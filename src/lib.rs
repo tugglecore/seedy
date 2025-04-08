@@ -2,83 +2,132 @@ use duckdb::{params, Connection, Result};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::arrow::util::pretty::print_batches;
 
-trait Locator {
-    fn build_registry<S: Store>(&self) -> StoreRegistry<S>;
+trait Store {
+    fn plant(&self, seed: &str);
 }
 
-impl Locator for &str {
-    fn build_registry<S: Store> (&self) -> StoreRegistry<S> {
-        let store = DuckStore::new();
-        let r = StoreRegistry::new(vec![store]);
-        r
+impl Store for DuckStore {
+    fn plant(&self, seed: &str) {
+        self.connection.execute("INSERT INTO a VALUES (1);", []).unwrap();
     }
 }
 
-trait Store {
-    fn what () -> u8 { 7 }
+struct DuckStore {
+    connection: Connection
 }
-
-impl Store for DuckStore {}
-
-struct DuckStore {}
 
 impl DuckStore {
     pub fn new() -> Self {
-        Self {}
+        let connection = Connection::open_in_memory().unwrap();
+        Self {
+            connection
+        }
+    }
+
+    pub fn from_connection(connection: Connection) -> Self {
+        Self {
+            connection
+        }
     }
 }
 
-struct Instruction {}
-
-pub fn prep_recipe<T: Recipe>(recipe: T) -> Vec<Instruction> {
-    vec![]
+#[derive(Debug)]
+struct Instruction {
+    store_name: String
 }
 
-trait Seeder {}
+pub fn prep_recipe<T: Recipe>(recipe: T) -> Vec<Instruction> {
+    vec![
+        Instruction { store_name: String::from("duckdb") }
+    ]
+}
+
+trait Seeder {
+    fn store_name(&self) -> &str;
+    fn seed(&self, instruction: Instruction);
+}
+
+struct DatabaseSeeder {
+    store: Box<dyn Store>
+}
+
+impl DatabaseSeeder {
+    fn new(store: Box<dyn Store>) -> Self {
+        Self { store }
+    }
+}
+
+impl Seeder for DatabaseSeeder {
+    fn store_name(&self) -> &str {
+        "duckdb"
+    }
+
+    fn seed(&self, instruction: Instruction) {
+        self.store.plant("sdf")
+    }
+}
 
 trait Recipe {}
 
 impl Recipe for &str {}
 
-struct StoreRegistry<S: Store> {
-    stores: Vec<S>
+trait StoreRegistry {
+    fn build_seeders(&self) -> Vec<Box<dyn Seeder>>;
 }
 
-impl<S: Store> StoreRegistry<S> {
-    pub fn new(stores: Vec<S>) -> Self {
-        Self {
-            stores
-        }
+impl StoreRegistry for &str {
+    fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
+        vec![
+            Box::new(
+                DatabaseSeeder::new(
+                    Box::new(DuckStore::new()))
+            )
+        ]
     }
 }
 
-struct Plower<S: Store> {
-    store_registry: StoreRegistry<S>
+impl StoreRegistry for Connection {
+    fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
+        let duckdb_connection = self.try_clone().unwrap();
+        vec![
+            Box::new(
+                DatabaseSeeder::new(
+                    Box::new(DuckStore::from_connection(duckdb_connection))
+                )
+            )
+        ]
+    }
 }
 
-impl<S: Store> Plower<S> {
-    pub fn new<L: Locator>(store_locator: L) -> Self {
-        let store_registry = store_locator.build_registry();
+struct Plower {
+    seeders: Vec<Box<dyn Seeder>>
+}
+
+impl Plower {
+    pub fn new<S: StoreRegistry>(store_registry: &S) -> Self {
+        let seeders = store_registry.build_seeders();
         Self {
-            store_registry
+            seeders
         }
     }
 
     pub fn seed<R: Recipe>(&self, recipe: R) {
         let instructions = prep_recipe(recipe);
 
-        for instruction in instructions {}
+        for instruction in instructions {
+            let seeder = self.seeders
+                .iter()
+                .find(|seeder| seeder.store_name() == instruction.store_name)
+                .unwrap();
+
+            seeder.seed(instruction);
+        }
     }
-}
-
-pub fn seed_recipe(target_name: &str, seed: u16)  {
-
 }
 
 pub fn add(left: u16, right: u16) -> u16 {
     left + right
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -87,12 +136,23 @@ mod tests {
     #[test]
     fn auto_discover_tables() {
         let connection = Connection::open_in_memory().unwrap();
-        let _ = connection.execute_batch("CREATE TABLE patient (id INTEGER);");
+        let _ = connection.execute_batch("CREATE TABLE a (id INTEGER);");
 
-        let store_registry = "duckdb";
-        // let plower = Plower::new(store_registry);
-        // let recipe = "patient [{1}, {2}]";
-        // plower.seed(recipe);
+        connection.execute("INSERT INTO a values (777)", []).unwrap();
+        let plower = Plower::new(&connection);
+        let recipe = "patient [{1}, {2}]";
+        plower.seed(recipe);
+
+        let results: Vec<RecordBatch> = connection
+            .prepare("Select * from a;")
+            .unwrap()
+            .query_arrow([])
+            .unwrap()
+            .collect();
+
+        println!("{results:#?}");
+
+        assert!(false);
     }
 
     #[test]

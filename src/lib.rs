@@ -138,21 +138,16 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         let _ = connection.execute_batch("CREATE TABLE a (id INTEGER);");
 
-        connection.execute("INSERT INTO a values (777)", []).unwrap();
         let plower = Plower::new(&connection);
         let recipe = "patient [{1}, {2}]";
         plower.seed(recipe);
 
-        let results: Vec<RecordBatch> = connection
+        let result: u8 = connection
             .prepare("Select * from a;")
             .unwrap()
-            .query_arrow([])
-            .unwrap()
-            .collect();
-
-        println!("{results:#?}");
-
-        assert!(false);
+            .query_row([], |row| row.get(0))
+            .unwrap();
+        assert_eq!(result, 1);
     }
 
     #[test]

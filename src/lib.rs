@@ -150,6 +150,15 @@ mod tests {
         assert_eq!(result, 1);
     }
 
+    #[tokio::test]
+    async fn test_seeding_s3() {
+        let config = aws_config::from_env()
+            .endpoint_url("http://localhost:4566")
+            .load()
+            .await;
+        let client = aws_sdk_s3::Client::new(&config);
+    }
+
     #[test]
     fn it_works() {
         let result = add(2, 2);

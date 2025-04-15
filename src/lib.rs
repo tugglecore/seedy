@@ -156,7 +156,13 @@ mod tests {
             .endpoint_url("http://localhost:4566")
             .load()
             .await;
-        let client = aws_sdk_s3::Client::new(&config);
+
+        let client = aws_sdk_sqs::Client::new(&config);
+
+        let queues = client.list_queues().send().await.unwrap();
+
+        println!("Queues: {queues:#?}");
+        assert!(false);
     }
 
     #[test]

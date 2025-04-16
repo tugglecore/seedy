@@ -1,7 +1,14 @@
 use duckdb::{params, Connection, Result};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::arrow::util::pretty::print_batches;
+use tokio::runtime::Builder;
+use async_trait::async_trait;
 
+/*
+ *
+ * service_scope { target <modifiers> [literals or generators(args)] }
+ *
+ */
 trait Store {
     fn plant(&self, seed: &str);
 }
@@ -31,6 +38,25 @@ impl DuckStore {
     }
 }
 
+struct SQSStore {
+    client: aws_sdk_sqs::Client
+}
+
+impl SQSStore {
+    async fn new() -> Self {
+        let config = aws_config::from_env()
+            .endpoint_url("http://localhost:4566")
+            .load()
+            .await;
+        let client = aws_sdk_sqs::Client::new(&config);
+        Self { client }
+    }
+}
+
+impl Store for SQSStore {
+    fn plant(&self, seed: &str) {}
+}
+
 #[derive(Debug)]
 struct Instruction {
     store_name: String
@@ -42,9 +68,10 @@ pub fn prep_recipe<T: Recipe>(recipe: T) -> Vec<Instruction> {
     ]
 }
 
+#[async_trait(?Send)]
 trait Seeder {
     fn store_name(&self) -> &str;
-    fn seed(&self, instruction: Instruction);
+    async fn seed(&self, instruction: Instruction);
 }
 
 struct DatabaseSeeder {
@@ -57,15 +84,38 @@ impl DatabaseSeeder {
     }
 }
 
+#[async_trait(?Send)]
 impl Seeder for DatabaseSeeder {
     fn store_name(&self) -> &str {
         "duckdb"
     }
 
-    fn seed(&self, instruction: Instruction) {
+    async fn seed(&self, instruction: Instruction) {
         self.store.plant("sdf")
     }
 }
+
+struct SQSSeeder {
+    store: Box<dyn Store>
+}
+
+impl SQSSeeder {
+    fn new(store: Box<dyn Store>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait(?Send)]
+impl Seeder for SQSSeeder {
+    fn store_name(&self) -> &str {
+        "sqs"
+    }
+
+    async fn seed(&self, instruction: Instruction) {
+        self.store.plant("abstraction")
+    }
+}
+
 
 trait Recipe {}
 
@@ -75,7 +125,7 @@ trait StoreRegistry {
     fn build_seeders(&self) -> Vec<Box<dyn Seeder>>;
 }
 
-impl StoreRegistry for &str {
+impl StoreRegistry for str {
     fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
         vec![
             Box::new(
@@ -85,6 +135,7 @@ impl StoreRegistry for &str {
         ]
     }
 }
+
 
 impl StoreRegistry for Connection {
     fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
@@ -99,19 +150,29 @@ impl StoreRegistry for Connection {
     }
 }
 
+
 struct Plower {
-    seeders: Vec<Box<dyn Seeder>>
+    seeders: Vec<Box<dyn Seeder>>,
+    runtime: tokio::runtime::Runtime
 }
 
 impl Plower {
-    pub fn new<S: StoreRegistry>(store_registry: &S) -> Self {
+    // TODO: Implement trait objects to allow list of distinct types
+    pub fn new<S: StoreRegistry + ?Sized>(store_registry: &S) -> Self {
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
         let seeders = store_registry.build_seeders();
+
         Self {
-            seeders
+            seeders,
+            runtime
         }
     }
 
-    pub fn seed<R: Recipe>(&self, recipe: R) {
+    pub async fn seed<R: Recipe>(&self, recipe: R) {
         let instructions = prep_recipe(recipe);
 
         for instruction in instructions {
@@ -150,20 +211,31 @@ mod tests {
         assert_eq!(result, 1);
     }
 
-    #[tokio::test]
-    async fn test_seeding_s3() {
-        let config = aws_config::from_env()
-            .endpoint_url("http://localhost:4566")
-            .load()
-            .await;
-
-        let client = aws_sdk_sqs::Client::new(&config);
-
-        let queues = client.list_queues().send().await.unwrap();
-
-        println!("Queues: {queues:#?}");
-        assert!(false);
-    }
+    // #[tokio::test]
+    // async fn test_seeding_s3() {
+    //     let config = aws_config::from_env()
+    //         .endpoint_url("http://localhost:4566")
+    //         .load()
+    //         .await;
+    //     let client = aws_sdk_sqs::Client::new(&config);
+    //     let queue_url = client
+    //         .create_queue()
+    //         .queue_name("crops")
+    //         .send()
+    //         .await
+    //         .unwrap()
+    //         .queue_url
+    //         .unwrap();
+    //
+    //     let plower = Plower::new("aws://localhost:4566");
+    //     // let recipe = "crops ['fertilizer']";
+    //     // plower.seed(recipe);
+    //
+    //     let queues = client.list_queues().send().await.unwrap();
+    //
+    //     println!("Queues: {queues:#?}");
+    //     // assert!(false);
+    // }
 
     #[test]
     fn it_works() {

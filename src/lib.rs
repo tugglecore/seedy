@@ -1,8 +1,9 @@
-use duckdb::{params, Connection, Result};
+use duckdb::{params, Connection, Result, Row};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::arrow::util::pretty::print_batches;
 use tokio::runtime::Builder;
 use async_trait::async_trait;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 /*
  *
@@ -13,28 +14,44 @@ trait Store {
     fn plant(&self, seed: &str);
 }
 
-impl Store for DuckStore {
-    fn plant(&self, seed: &str) {
-        self.connection.execute("INSERT INTO a VALUES (1);", []).unwrap();
-    }
-}
 
 struct DuckStore {
-    connection: Connection
+    query_sender: Sender<String>, 
+    row_receiver: Receiver<String>,
+    handle: std::thread::JoinHandle<()>
 }
 
 impl DuckStore {
-    pub fn new() -> Self {
-        let connection = Connection::open_in_memory().unwrap();
-        Self {
-            connection
-        }
-    }
+    // pub fn new() -> Self {
+    //     let connection = Connection::open_in_memory().unwrap();
+    //     Self {
+    //         connection
+    //     }
+    // }
 
     pub fn from_connection(connection: Connection) -> Self {
+        let (query_sender, mut query_receiver) = channel(100);
+        let (row_sender, mut row_receiver) = channel(100);
+
+        let handle = std::thread::spawn(move || {
+            while let Some(query) = query_receiver.blocking_recv() {
+                row_sender.blocking_send(String::new());
+                connection.execute("select 1", []);
+            }
+        });
+
+        
         Self {
-            connection
+            handle,
+            row_receiver,
+            query_sender
         }
+    }
+}
+
+impl Store for DuckStore {
+    fn plant(&self, seed: &str) {
+        // self.connection.execute("INSERT INTO a VALUES (1);", []).unwrap();
     }
 }
 
@@ -68,23 +85,23 @@ pub fn prep_recipe<T: Recipe>(recipe: T) -> Vec<Instruction> {
     ]
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 trait Seeder {
     fn store_name(&self) -> &str;
     async fn seed(&self, instruction: Instruction);
 }
 
 struct DatabaseSeeder {
-    store: Box<dyn Store>
+    store: Box<dyn Store + Send + Sync>
 }
 
 impl DatabaseSeeder {
-    fn new(store: Box<dyn Store>) -> Self {
+    fn new(store: Box<dyn Store + Send + Sync>) -> Self {
         Self { store }
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Seeder for DatabaseSeeder {
     fn store_name(&self) -> &str {
         "duckdb"
@@ -96,23 +113,25 @@ impl Seeder for DatabaseSeeder {
 }
 
 struct SQSSeeder {
-    store: Box<dyn Store>
+    store: aws_sdk_sqs::Client
 }
 
 impl SQSSeeder {
-    fn new(store: Box<dyn Store>) -> Self {
+    fn new(store: aws_sdk_sqs::Client) -> Self {
         Self { store }
     }
+
+    fn plant(&self, msg: &str) {}
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Seeder for SQSSeeder {
     fn store_name(&self) -> &str {
         "sqs"
     }
 
     async fn seed(&self, instruction: Instruction) {
-        self.store.plant("abstraction")
+        self.plant("abstraction")
     }
 }
 
@@ -128,10 +147,6 @@ trait StoreRegistry {
 impl StoreRegistry for str {
     fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
         vec![
-            Box::new(
-                DatabaseSeeder::new(
-                    Box::new(DuckStore::new()))
-            )
         ]
     }
 }
@@ -211,31 +226,31 @@ mod tests {
         assert_eq!(result, 1);
     }
 
-    // #[tokio::test]
-    // async fn test_seeding_s3() {
-    //     let config = aws_config::from_env()
-    //         .endpoint_url("http://localhost:4566")
-    //         .load()
-    //         .await;
-    //     let client = aws_sdk_sqs::Client::new(&config);
-    //     let queue_url = client
-    //         .create_queue()
-    //         .queue_name("crops")
-    //         .send()
-    //         .await
-    //         .unwrap()
-    //         .queue_url
-    //         .unwrap();
-    //
-    //     let plower = Plower::new("aws://localhost:4566");
-    //     // let recipe = "crops ['fertilizer']";
-    //     // plower.seed(recipe);
-    //
-    //     let queues = client.list_queues().send().await.unwrap();
-    //
-    //     println!("Queues: {queues:#?}");
-    //     // assert!(false);
-    // }
+    #[tokio::test]
+    async fn test_seeding_s3() {
+        let config = aws_config::from_env()
+            .endpoint_url("http://localhost:4566")
+            .load()
+            .await;
+        let client = aws_sdk_sqs::Client::new(&config);
+        let queue_url = client
+            .create_queue()
+            .queue_name("crops")
+            .send()
+            .await
+            .unwrap()
+            .queue_url
+            .unwrap();
+
+        let plower = Plower::new("aws://localhost:4566");
+        // let recipe = "crops ['fertilizer']";
+        // plower.seed(recipe);
+
+        let queues = client.list_queues().send().await.unwrap();
+
+        println!("Queues: {queues:#?}");
+        // assert!(false);
+    }
 
     #[test]
     fn it_works() {

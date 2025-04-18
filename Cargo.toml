@@ -10,3 +10,4 @@ aws-sdk-s3 = "1.82.0"
 aws-sdk-sqs = "1.64.0"
 duckdb = { version = "1.2.1", features = ["bundled"] }
 tokio = { version = "1.44.2", features = ["full"] }
+url = "2.5.4"

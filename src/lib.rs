@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use duckdb::arrow::record_batch::RecordBatch;
-use duckdb::arrow::util::pretty::print_batches;
-use duckdb::{Connection, Result, Row, params};
+use duckdb::{Connection, Result};
 use std::str::FromStr;
 use tiberius::{AuthMethod, Client, Config, Query};
 use tokio::net::TcpStream;
@@ -47,7 +45,7 @@ impl SqlServerStore {
 #[async_trait]
 impl Store for SqlServerStore {
     async fn plant(&self, seed: &str) {
-        let mut query = Query::new("INSERT INTO tempdb.dbo.canvas VALUES (234)");
+        let query = Query::new("INSERT INTO tempdb.dbo.canvas VALUES (234)");
         // self.query_sender.send(String::new()).await.unwrap();
         // let mut receiver = self.row_receiver.lock().await;
         // receiver.recv().await;
@@ -69,7 +67,7 @@ struct DuckStore {
 impl DuckStore {
     pub fn from_connection(connection: Connection) -> Self {
         let (query_sender, mut query_receiver) = channel(100);
-        let (row_sender, mut row_receiver) = channel(100);
+        let (row_sender, row_receiver) = channel(100);
         let row_receiver = Mutex::new(row_receiver);
         let handle = std::thread::spawn(move || {
             while let Some(query) = query_receiver.blocking_recv() {
@@ -385,7 +383,7 @@ mod tests {
         tcp.set_nodelay(true).unwrap();
         let mut client = Client::connect(config, tcp.compat_write()).await.unwrap();
 
-        let mut query = Query::new("INSERT INTO tempdb.dbo.canvas VALUES (234)");
+        let query = Query::new("INSERT INTO tempdb.dbo.canvas VALUES (234)");
         let results = query.execute(&mut client).await.unwrap();
 
         let plower = Plower::new("ms://sa:Seedy2025@localhost:1433").await;

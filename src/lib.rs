@@ -2,10 +2,13 @@ use async_trait::async_trait;
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::arrow::util::pretty::print_batches;
 use duckdb::{Connection, Result, Row, params};
+use std::str::FromStr;
 use tokio::runtime::Builder;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use std::str::FromStr;
+use tiberius::{Client, Config, Query, AuthMethod};
+use tokio::net::TcpStream;
+use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 /*
  *
@@ -15,6 +18,44 @@ use std::str::FromStr;
 #[async_trait]
 trait Store {
     async fn plant(&self, seed: &str);
+    fn store_name(&self) -> String;
+}
+
+
+struct SqlServerStore {
+    connection: Mutex<Client<Compat<TcpStream>>>
+}
+
+impl SqlServerStore {
+    async fn new(url: url::Url) -> Self {
+        let mut config = Config::new();
+        config.host("localhost");
+        config.port(1433);
+        config.authentication(AuthMethod::sql_server("SA", "Seedy2025"));
+        config.trust_cert();
+
+        let tcp = TcpStream::connect(config.get_addr()).await.unwrap();
+        tcp.set_nodelay(true).unwrap();
+        let connection = Client::connect(config, tcp.compat_write()).await.unwrap();
+        let connection = Mutex::new(connection);
+        Self { connection }
+    }
+
+}
+#[async_trait]
+impl Store for SqlServerStore {
+    async fn plant(&self, seed: &str) {
+        let mut query = Query::new("INSERT INTO tempdb.dbo.canvas VALUES (234)");
+        // self.query_sender.send(String::new()).await.unwrap();
+        // let mut receiver = self.row_receiver.lock().await;
+        // receiver.recv().await;
+        let mut conn = self.connection.lock().await;
+        let results = query.execute(&mut conn).await.unwrap();
+    }
+
+    fn store_name(&self) -> String {
+        String::from("ms")
+    }
 }
 
 struct DuckStore {
@@ -55,42 +96,27 @@ impl Store for DuckStore {
         let mut receiver = self.row_receiver.lock().await;
         receiver.recv().await;
     }
-}
 
-struct SQSStore {
-    client: aws_sdk_sqs::Client,
-}
-
-impl SQSStore {
-    async fn new() -> Self {
-        let config = aws_config::from_env()
-            .endpoint_url("http://localhost:4566")
-            .load()
-            .await;
-        let client = aws_sdk_sqs::Client::new(&config);
-        Self { client }
+    fn store_name(&self) -> String {
+        String::from("duckdb")
     }
 }
 
-#[async_trait]
-impl Store for SQSStore {
-    async fn plant(&self, seed: &str) {}
-}
 
 #[derive(Debug)]
 struct Instruction {
     store_name: String,
 }
 
-pub fn prep_recipe<T: Recipe>(recipe: T) -> Vec<Instruction> {
+pub fn prep_recipe(recipe: &str) -> Vec<Instruction> {
     vec![Instruction {
-        store_name: String::from("duckdb"),
+        store_name: String::from(recipe),
     }]
 }
 
 #[async_trait]
 trait Seeder: Send + Sync {
-    fn store_name(&self) -> &str;
+    fn store_name(&self) -> String;
     async fn seed(&self, instruction: Instruction);
 }
 
@@ -111,8 +137,8 @@ impl DatabaseSeeder {
 
 #[async_trait]
 impl Seeder for DatabaseSeeder {
-    fn store_name(&self) -> &str {
-        "duckdb"
+    fn store_name(&self) -> String {
+       self.store.store_name()
     }
 
     async fn seed(&self, instruction: Instruction) {
@@ -126,25 +152,37 @@ struct SQSSeeder {
 
 impl SQSSeeder {
     async fn new(url: url::Url) -> Self {
-            let config = aws_config::from_env()
-                .endpoint_url("sqs://localhost:4566")
-                .load()
-                .await;
-            let store = aws_sdk_sqs::Client::new(&config);
+        let config = aws_config::from_env()
+            .endpoint_url("http://localhost:4566")
+            .load()
+            .await;
+        let store = aws_sdk_sqs::Client::new(&config);
         Self { store }
     }
-
-    fn plant(&self, msg: &str) {}
 }
 
 #[async_trait]
 impl Seeder for SQSSeeder {
-    fn store_name(&self) -> &str {
-        "sqs"
+    fn store_name(&self) -> String {
+        String::from("sqs")
     }
 
     async fn seed(&self, instruction: Instruction) {
-        self.plant("abstraction")
+        let queue_url = self.store
+            .get_queue_url()
+            .queue_name("crops")
+            .send()
+            .await
+            .unwrap()
+            .queue_url
+            .unwrap();
+            
+        self.store
+            .send_message()
+            .queue_url(queue_url)
+            .message_body("fertilizer")
+            .send()
+            .await;
     }
 }
 
@@ -155,7 +193,8 @@ impl Recipe for &str {}
 #[derive(Debug)]
 enum StoreKind {
     sqs,
-    DuckDB
+    SqlServer,
+    DuckDB,
 }
 
 impl FromStr for StoreKind {
@@ -166,8 +205,9 @@ impl FromStr for StoreKind {
     fn from_str(store_name: &str) -> Result<Self, Self::Err> {
         let store = match store_name {
             "sqs" => Self::sqs,
+            "ms" => Self::SqlServer,
             "duckdb" => Self::DuckDB,
-            _ => panic!("unknown store")
+            _ => panic!("unknown store"),
         };
 
         Ok(store)
@@ -185,13 +225,19 @@ impl StoreRegistry for str {
         use StoreKind::*;
 
         let mut seeders = vec![];
-        
+
+        println!("What is self: {self:#?}");
         let url = url::Url::parse(self).unwrap();
-        
+
         let store_kind = StoreKind::from_str(url.scheme()).unwrap();
 
+        println!("What is the store kind: {store_kind:#?}");
         let seeder: Box<dyn Seeder> = match store_kind {
             sqs => Box::new(SQSSeeder::new(url).await),
+            SqlServer => {
+                let store = SqlServerStore::new(url).await;
+                Box::new(DatabaseSeeder::new(Box::new(store)))
+            }
             DuckDB => {
                 let connection = Connection::open_in_memory().unwrap();
                 Box::new(DatabaseSeeder::for_duckdb(connection))
@@ -218,8 +264,6 @@ struct Plower {
     seeders: Vec<Box<dyn Seeder>>,
 }
 
-
-
 impl Plower {
     // TODO: Implement trait objects to allow list of distinct types
     pub async fn new<S: StoreRegistry + ?Sized>(store_registry: &S) -> Self {
@@ -228,9 +272,14 @@ impl Plower {
         Self { seeders }
     }
 
-    pub async fn seed<R: Recipe>(&self, recipe: R) {
+    pub async fn seed(&self, recipe: &str) {
         let instructions = prep_recipe(recipe);
 
+        let seeder_count = self.seeders.len();
+        println!("INstruction are: {instructions:#?}");
+        println!("How many seeders we have: {seeder_count:#?}");
+        let seeder_name = self.seeders.first().unwrap().store_name();
+        println!("seeder name is: {seeder_name}");
         for instruction in instructions {
             let seeder = self
                 .seeders
@@ -241,26 +290,18 @@ impl Plower {
             seeder.seed(instruction).await;
         }
     }
-    
+
     fn from_duckdb(connection: &Connection) -> Self {
         let mut seeders: Vec<Box<dyn Seeder>> = vec![];
 
         let duckdb_connection = connection.try_clone().unwrap();
 
-        seeders.push(
-            Box::new(
-                DatabaseSeeder::for_duckdb(duckdb_connection)
-            )
-        );
-    
+        seeders.push(Box::new(DatabaseSeeder::for_duckdb(duckdb_connection)));
+
         Self { seeders }
     }
-   
 }
 
-pub fn add(left: u16, right: u16) -> u16 {
-    left + right
-}
 
 #[cfg(test)]
 mod tests {
@@ -272,8 +313,7 @@ mod tests {
         let _ = connection.execute_batch("CREATE TABLE a (id INTEGER);");
 
         let plower = Plower::from_duckdb(&connection);
-        let recipe = "patient [{1}, {2}]";
-        plower.seed(recipe).await;
+        plower.seed("duckdb").await;
 
         let result: u8 = connection
             .prepare("Select * from a;")
@@ -299,19 +339,55 @@ mod tests {
             .queue_url
             .unwrap();
 
-        let plower = Plower::new("sqs://localhost:4566");
-        // let recipe = "crops ['fertilizer']";
-        // plower.seed(recipe);
+        client
+            .send_message()
+            .queue_url(queue_url)
+            .message_body("fertilizer")
+            .send()
+            .await;
+
+        // sqs://localhost:4566"
+        let plower = Plower::new("sqs://localhost:4566").await;
+        let recipe = "crops ['fertilizer']";
+        plower.seed("sqs").await;
 
         let queues = client.list_queues().send().await.unwrap();
 
-        println!("Queues: {queues:#?}");
-        // assert!(false);
+        let msgs = client
+            .receive_message()
+            .queue_url("http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/crops")
+            .max_number_of_messages(1)
+            .send()
+            .await
+            .unwrap()
+            .messages
+            .unwrap();
+        let actual_msg = msgs
+            .first()
+            .unwrap()
+            .body()
+            .unwrap();
+
+        assert_eq!(actual_msg, "fertilizer");
     }
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    #[tokio::test]
+    async fn test_sql_server() {
+        let mut config = Config::new();
+        config.host("localhost");
+        config.port(1433);
+        config.authentication(AuthMethod::sql_server("SA", "Seedy2025"));
+        config.trust_cert();
+
+        let tcp = TcpStream::connect(config.get_addr()).await.unwrap();
+        tcp.set_nodelay(true).unwrap();
+        let mut client = Client::connect(config, tcp.compat_write()).await.unwrap();
+
+        let mut query = Query::new("INSERT INTO tempdb.dbo.canvas VALUES (234)");
+        let results = query.execute(&mut client).await.unwrap();
+
+        let plower = Plower::new("ms://sa:Seedy2025@localhost:1433").await;
+        plower.seed("ms").await;
     }
+
 }

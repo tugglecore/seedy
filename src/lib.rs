@@ -45,10 +45,12 @@ impl SqlServerStore {
 #[async_trait]
 impl Store for SqlServerStore {
     async fn plant(&self, seed: &str) {
-        let query = Query::new("INSERT INTO tempdb.dbo.canvas VALUES (234)");
-        // self.query_sender.send(String::new()).await.unwrap();
-        // let mut receiver = self.row_receiver.lock().await;
-        // receiver.recv().await;
+        let query = Query::new(
+            "
+                TRUNCATE TABLE tempdb.dbo.canvas;
+                INSERT INTO tempdb.dbo.canvas VALUES (234);
+            "
+        );
         let mut conn = self.connection.lock().await;
         let results = query.execute(&mut conn).await.unwrap();
     }
@@ -383,10 +385,30 @@ mod tests {
         tcp.set_nodelay(true).unwrap();
         let mut client = Client::connect(config, tcp.compat_write()).await.unwrap();
 
-        let query = Query::new("INSERT INTO tempdb.dbo.canvas VALUES (234)");
+        let query = Query::new(
+            "
+                DROP TABLE IF EXISTS tempdb.dbo.canvas;
+                CREATE TABLE tempdb.dbo.canvas (a int);
+            "
+        );
+        // let query = Query::new("INSERT INTO tempdb.dbo.canvas VALUES (234)");
         let results = query.execute(&mut client).await.unwrap();
 
         let plower = Plower::new("ms://sa:Seedy2025@localhost:1433").await;
         plower.seed("ms").await;
+
+        let actual_val = client.simple_query(
+            "select a from tempdb.dbo.canvas"
+        )
+            .await
+            .unwrap()
+            .into_row()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i32, _>("a")
+            .unwrap();
+
+        assert_eq!(actual_val, 234);
     }
 }

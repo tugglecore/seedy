@@ -3,11 +3,10 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::arrow::util::pretty::print_batches;
 use duckdb::{Connection, Result, Row, params};
 use std::str::FromStr;
-use tokio::runtime::Builder;
+use tiberius::{AuthMethod, Client, Config, Query};
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tiberius::{Client, Config, Query, AuthMethod};
-use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 /*
@@ -15,15 +14,18 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
  * service_scope { target <modifiers> [literals or generators(args)] }
  *
  */
+
+/******************************************************************************************************************************************
+ *************************************************************** STORE ********************************************************************
+******************************************************************************************************************************************/
 #[async_trait]
 trait Store {
     async fn plant(&self, seed: &str);
     fn store_name(&self) -> String;
 }
 
-
 struct SqlServerStore {
-    connection: Mutex<Client<Compat<TcpStream>>>
+    connection: Mutex<Client<Compat<TcpStream>>>,
 }
 
 impl SqlServerStore {
@@ -40,8 +42,8 @@ impl SqlServerStore {
         let connection = Mutex::new(connection);
         Self { connection }
     }
-
 }
+
 #[async_trait]
 impl Store for SqlServerStore {
     async fn plant(&self, seed: &str) {
@@ -102,6 +104,9 @@ impl Store for DuckStore {
     }
 }
 
+/******************************************************************************************************************************************
+ ************************************************************* INSTRUCTION ********************************************************************
+******************************************************************************************************************************************/
 
 #[derive(Debug)]
 struct Instruction {
@@ -113,6 +118,13 @@ pub fn prep_recipe(recipe: &str) -> Vec<Instruction> {
         store_name: String::from(recipe),
     }]
 }
+
+trait Recipe {}
+impl Recipe for &str {}
+
+/******************************************************************************************************************************************
+ ************************************************************* RECIPE ********************************************************************
+******************************************************************************************************************************************/
 
 #[async_trait]
 trait Seeder: Send + Sync {
@@ -138,7 +150,7 @@ impl DatabaseSeeder {
 #[async_trait]
 impl Seeder for DatabaseSeeder {
     fn store_name(&self) -> String {
-       self.store.store_name()
+        self.store.store_name()
     }
 
     async fn seed(&self, instruction: Instruction) {
@@ -168,7 +180,8 @@ impl Seeder for SQSSeeder {
     }
 
     async fn seed(&self, instruction: Instruction) {
-        let queue_url = self.store
+        let queue_url = self
+            .store
             .get_queue_url()
             .queue_name("crops")
             .send()
@@ -176,7 +189,7 @@ impl Seeder for SQSSeeder {
             .unwrap()
             .queue_url
             .unwrap();
-            
+
         self.store
             .send_message()
             .queue_url(queue_url)
@@ -186,9 +199,9 @@ impl Seeder for SQSSeeder {
     }
 }
 
-trait Recipe {}
-
-impl Recipe for &str {}
+/******************************************************************************************************************************************
+ *************************************************** STORE KIND & REGISTRY ***************************************************************
+******************************************************************************************************************************************/
 
 #[derive(Debug)]
 enum StoreKind {
@@ -250,15 +263,9 @@ impl StoreRegistry for str {
     }
 }
 
-// #[async_trait]
-// impl StoreRegistry for Connection {
-//     async fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
-//         let duckdb_connection = self.try_clone().unwrap();
-//         vec![Box::new(DatabaseSeeder::new(Box::new(
-//             DuckStore::from_connection(duckdb_connection),
-//         )))]
-//     }
-// }
+/******************************************************************************************************************************************
+ *********************************************************** PLOWER ************************************************************************
+******************************************************************************************************************************************/
 
 struct Plower {
     seeders: Vec<Box<dyn Seeder>>,
@@ -301,7 +308,6 @@ impl Plower {
         Self { seeders }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -362,11 +368,7 @@ mod tests {
             .unwrap()
             .messages
             .unwrap();
-        let actual_msg = msgs
-            .first()
-            .unwrap()
-            .body()
-            .unwrap();
+        let actual_msg = msgs.first().unwrap().body().unwrap();
 
         assert_eq!(actual_msg, "fertilizer");
     }
@@ -389,5 +391,4 @@ mod tests {
         let plower = Plower::new("ms://sa:Seedy2025@localhost:1433").await;
         plower.seed("ms").await;
     }
-
 }

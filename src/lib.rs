@@ -6,10 +6,18 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
+use std::io::{Write, Read, Seek, SeekFrom};
+use arrow_array::record_batch;
+use std::path::PathBuf;
+use tokio::fs::File;
+use parquet::arrow::async_writer::AsyncArrowWriter;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 /*
  *
  * service_scope { target <modifiers> [literals or generators(args)] }
+ *
+ * file { course.parquet <format: parquet> [ { topic: Chemistry } ] }
  *
  */
 
@@ -105,7 +113,7 @@ impl Store for DuckStore {
 }
 
 /******************************************************************************************************************************************
- ************************************************************* INSTRUCTION ********************************************************************
+ ***************************************************** INSTRUCTION & RECIPE ************************************************************
 ******************************************************************************************************************************************/
 
 #[derive(Debug)]
@@ -123,7 +131,7 @@ trait Recipe {}
 impl Recipe for &str {}
 
 /******************************************************************************************************************************************
- ************************************************************* RECIPE ********************************************************************
+ ************************************************************* SEEDER ********************************************************************
 ******************************************************************************************************************************************/
 
 #[async_trait]
@@ -199,6 +207,52 @@ impl Seeder for SQSSeeder {
     }
 }
 
+struct FileSeeder {
+    path: PathBuf
+}
+
+impl FileSeeder {
+    fn new(url: url::Url) -> Self {
+        Self { path: PathBuf::from(url.path()) }
+    }
+
+    async fn seed_parquet(&self, instruction: Instruction) {
+        let batch = record_batch!(
+            ("a", Int32, [1, 2, 3])
+        ).unwrap();
+
+        println!("what we have in the batch: {batch:#?}");
+        let filename = self.path.join("course.parquet");
+        println!("What path did we create {filename:#?}");
+
+        let mut file = File::create(filename).await.unwrap();
+
+        let mut writer = AsyncArrowWriter::try_new(
+            &mut file,
+            batch.schema(),
+            None
+        ).unwrap();
+
+        writer.write(&batch).await.unwrap();
+        writer.close().await.unwrap();
+    }
+}
+
+#[async_trait]
+impl Seeder for FileSeeder {
+    fn store_name(&self) -> String { String::from("file") }
+
+    async fn seed(&self, instruction: Instruction) {
+        let format = String::from("parquet");
+
+        match format.as_str() {
+            "parquet" => self.seed_parquet(instruction).await,
+            _ => panic!("unknown file format")
+        };
+   }
+
+}
+
 /******************************************************************************************************************************************
  *************************************************** STORE KIND & REGISTRY ***************************************************************
 ******************************************************************************************************************************************/
@@ -208,6 +262,7 @@ enum StoreKind {
     sqs,
     SqlServer,
     DuckDB,
+    File
 }
 
 impl FromStr for StoreKind {
@@ -218,9 +273,10 @@ impl FromStr for StoreKind {
     fn from_str(store_name: &str) -> Result<Self, Self::Err> {
         let store = match store_name {
             "sqs" => Self::sqs,
+            "file" => Self::File,
             "ms" => Self::SqlServer,
             "duckdb" => Self::DuckDB,
-            _ => panic!("unknown store"),
+            _ => panic!("unknown store: received store {store_name}"),
         };
 
         Ok(store)
@@ -239,14 +295,18 @@ impl StoreRegistry for str {
 
         let mut seeders = vec![];
 
-        println!("What is self: {self:#?}");
+        // println!("What is self: {self:#?}");
         let url = url::Url::parse(self).unwrap();
+        // println!("Url is: {url:#?}");
 
         let store_kind = StoreKind::from_str(url.scheme()).unwrap();
 
-        println!("What is the store kind: {store_kind:#?}");
+        // TODO: remove boxing from each branch. Potential solution is to
+        // implement Into<Box> for every seeder. This will only result in
+        // a code asthetic improvement
         let seeder: Box<dyn Seeder> = match store_kind {
             sqs => Box::new(SQSSeeder::new(url).await),
+            File => Box::new(FileSeeder::new(url)),
             SqlServer => {
                 let store = SqlServerStore::new(url).await;
                 Box::new(DatabaseSeeder::new(Box::new(store)))
@@ -256,10 +316,19 @@ impl StoreRegistry for str {
                 Box::new(DatabaseSeeder::for_duckdb(connection))
             }
         };
+        
+        // let seeder = Box::new(seeder);
 
         seeders.push(seeder);
 
         seeders
+    }
+}
+
+#[async_trait]
+impl StoreRegistry for String {
+    async fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
+        self.as_str().build_seeders().await
     }
 }
 
@@ -410,5 +479,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(actual_val, 234);
+    }
+
+
+    #[tokio::test]
+    async fn test_building_parquet() {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let tmpdir = tmpdir.path().to_str().unwrap();
+        let file_store = "file://".to_string() + tmpdir;
+        let expected_batch = record_batch!(
+            ("a", Int32, [1, 2, 3])
+        ).unwrap();
+
+        let plower = Plower::new(&file_store).await;
+        // let recipe = "file { course.parquet <parquet> [ { topic: Chemistry } ] }";
+        plower.seed("file").await;
+
+        let filename = tmpdir.to_string().clone() + "/course.parquet";
+        let file = std::fs::File::open(filename).unwrap();
+        let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let actual_batch = reader.next().unwrap().unwrap();
+        println!("Record Batch {actual_batch:#?}");
+        assert_eq!(actual_batch, expected_batch);
     }
 }

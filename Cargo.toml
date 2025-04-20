@@ -4,11 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arrow = "55.0.0"
+arrow-array = "55.0.0"
+arrow-schema = "55.0.0"
 async-trait = "0.1.88"
 aws-config = "1.6.1"
 aws-sdk-s3 = "1.82.0"
 aws-sdk-sqs = "1.64.0"
 duckdb = { version = "1.2.1", features = ["bundled"] }
+parquet = { version = "55.0.0", features = ["arrow", "async"] }
+tempfile = "3.19.1"
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "rustls"] }
 tokio = { version = "1.44.2", features = ["full"] }
 tokio-util = "0.7.14"

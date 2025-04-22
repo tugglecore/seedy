@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_seeding_s3() {
+    async fn test_seeding_sqs() {
         let config = aws_config::from_env()
             .endpoint_url("http://localhost:4566")
             .load()
@@ -440,6 +440,63 @@ mod tests {
         let actual_msg = msgs.first().unwrap().body().unwrap();
 
         assert_eq!(actual_msg, "fertilizer");
+    }
+
+    #[tokio::test]
+    async fn test_seeding_s3() {
+        let config = aws_config::from_env()
+            .endpoint_url("http://localhost:4566")
+            .load()
+            .await;
+        let client = aws_sdk_s3::Client::new(&config);
+        let bucket_location = client
+            .create_bucket()
+            .bucket("farm")
+            .send()
+            .await
+            .unwrap()
+            .location
+            .unwrap();
+
+        println!("What is the bucket location: {bucket_location:#?}");
+
+        let buckets = client
+            .list_buckets()
+            .send()
+            .await
+            .unwrap()
+            .buckets
+            .unwrap()
+            .iter()
+            .for_each(|bucket| {println!("What is this bucket name: {:#?}", bucket.name); });
+        assert!(false)
+
+        // client
+        //     .send_message()
+        //     .queue_url(queue_url)
+        //     .message_body("fertilizer")
+        //     .send()
+        //     .await;
+        //
+        // // sqs://localhost:4566"
+        // let plower = Plower::new("sqs://localhost:4566").await;
+        // let recipe = "crops ['fertilizer']";
+        // plower.seed("sqs").await;
+        //
+        // let queues = client.list_queues().send().await.unwrap();
+        //
+        // let msgs = client
+        //     .receive_message()
+        //     .queue_url("http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/crops")
+        //     .max_number_of_messages(1)
+        //     .send()
+        //     .await
+        //     .unwrap()
+        //     .messages
+        //     .unwrap();
+        // let actual_msg = msgs.first().unwrap().body().unwrap();
+        //
+        // assert_eq!(actual_msg, "fertilizer");
     }
 
     #[tokio::test]

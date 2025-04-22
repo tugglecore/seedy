@@ -12,6 +12,7 @@ aws-config = "1.6.1"
 aws-sdk-s3 = "1.82.0"
 aws-sdk-sqs = "1.64.0"
 duckdb = { version = "1.2.1", features = ["bundled"] }
+object_store = "0.12.0"
 parquet = { version = "55.0.0", features = ["arrow", "async"] }
 tempfile = "3.19.1"
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "rustls"] }

@@ -144,6 +144,10 @@ struct DatabaseSeeder {
     store: Box<dyn Store + Send + Sync>,
 }
 
+impl From<DatabaseSeeder> for Box<dyn Seeder> {
+    fn from(value: DatabaseSeeder) -> Self { Box::new(value) }
+}
+
 impl DatabaseSeeder {
     fn new(store: Box<dyn Store + Send + Sync>) -> Self {
         Self { store }
@@ -207,6 +211,26 @@ impl Seeder for SQSSeeder {
     }
 }
 
+impl From<SQSSeeder> for Box<dyn Seeder> {
+    fn from(value: SQSSeeder) -> Self { Box::new(value) }
+}
+
+struct S3Seeder;
+
+impl S3Seeder {
+    async fn new(url: url::Url) -> Self { Self }
+}
+
+#[async_trait]
+impl Seeder for S3Seeder {
+    fn store_name(&self) -> String { String::from("S3") }
+    async fn seed(&self, instruction: Instruction) {}
+}
+
+impl From<S3Seeder> for Box<dyn Seeder> {
+    fn from(value: S3Seeder) -> Self { Box::new(value) }
+}
+
 struct FileSeeder {
     path: PathBuf
 }
@@ -253,12 +277,17 @@ impl Seeder for FileSeeder {
 
 }
 
+impl From<FileSeeder> for Box<dyn Seeder> {
+    fn from(value: FileSeeder) -> Self { Box::new(value) }
+}
+
 /******************************************************************************************************************************************
  *************************************************** STORE KIND & REGISTRY ***************************************************************
 ******************************************************************************************************************************************/
 
 #[derive(Debug)]
 enum StoreKind {
+    S3,
     sqs,
     SqlServer,
     DuckDB,
@@ -275,6 +304,7 @@ impl FromStr for StoreKind {
             "sqs" => Self::sqs,
             "file" => Self::File,
             "ms" => Self::SqlServer,
+            "s3" => Self::S3,
             "duckdb" => Self::DuckDB,
             _ => panic!("unknown store: received store {store_name}"),
         };
@@ -287,6 +317,7 @@ impl FromStr for StoreKind {
 trait StoreRegistry {
     async fn build_seeders(&self) -> Vec<Box<dyn Seeder>>;
 }
+
 
 #[async_trait]
 impl StoreRegistry for str {
@@ -305,15 +336,16 @@ impl StoreRegistry for str {
         // implement Into<Box> for every seeder. This will only result in
         // a code asthetic improvement
         let seeder: Box<dyn Seeder> = match store_kind {
-            sqs => Box::new(SQSSeeder::new(url).await),
-            File => Box::new(FileSeeder::new(url)),
+            S3 => S3Seeder::new(url).await.into(),
+            sqs => SQSSeeder::new(url).await.into(),
+            File => FileSeeder::new(url).into(),
             SqlServer => {
                 let store = SqlServerStore::new(url).await;
-                Box::new(DatabaseSeeder::new(Box::new(store)))
+                DatabaseSeeder::new(Box::new(store)).into()
             }
             DuckDB => {
                 let connection = Connection::open_in_memory().unwrap();
-                Box::new(DatabaseSeeder::for_duckdb(connection))
+                DatabaseSeeder::for_duckdb(connection).into()
             }
         };
         
@@ -445,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn test_seeding_s3() {
         let config = aws_config::from_env()
-            .endpoint_url("http://localhost:4566")
+            .endpoint_url("http://s3.localhost.localstack.cloud:4566")
             .load()
             .await;
         let client = aws_sdk_s3::Client::new(&config);
@@ -458,31 +490,10 @@ mod tests {
             .location
             .unwrap();
 
-        println!("What is the bucket location: {bucket_location:#?}");
+        // let plower = Plower::new("s3://localhost:4566").await;
+        // // let recipe = "crops ['fertilizer']";
+        // plower.seed("s3").await;
 
-        let buckets = client
-            .list_buckets()
-            .send()
-            .await
-            .unwrap()
-            .buckets
-            .unwrap()
-            .iter()
-            .for_each(|bucket| {println!("What is this bucket name: {:#?}", bucket.name); });
-        assert!(false)
-
-        // client
-        //     .send_message()
-        //     .queue_url(queue_url)
-        //     .message_body("fertilizer")
-        //     .send()
-        //     .await;
-        //
-        // // sqs://localhost:4566"
-        // let plower = Plower::new("sqs://localhost:4566").await;
-        // let recipe = "crops ['fertilizer']";
-        // plower.seed("sqs").await;
-        //
         // let queues = client.list_queues().send().await.unwrap();
         //
         // let msgs = client
@@ -497,6 +508,7 @@ mod tests {
         // let actual_msg = msgs.first().unwrap().body().unwrap();
         //
         // assert_eq!(actual_msg, "fertilizer");
+        assert!(false)
     }
 
     #[tokio::test]

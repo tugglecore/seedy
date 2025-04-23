@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use tokio::fs::File;
 use parquet::arrow::async_writer::AsyncArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use object_store::{GetResultPayload, ObjectStore};
 
 /*
  *
@@ -215,20 +216,42 @@ impl From<SQSSeeder> for Box<dyn Seeder> {
     fn from(value: SQSSeeder) -> Self { Box::new(value) }
 }
 
-struct S3Seeder;
+struct ObjectSeeder {
+    store: Box<dyn ObjectStore>
+}
 
-impl S3Seeder {
-    async fn new(url: url::Url) -> Self { Self }
+impl ObjectSeeder {
+    async fn new(url: url::Url) -> Self {
+        let store = object_store::aws::AmazonS3Builder::from_env()
+            .with_bucket_name("farm")
+            .with_access_key_id("test")
+            .with_secret_access_key("test")
+            .with_endpoint("http://localhost:4566")
+            .with_allow_http(true)
+            .build()
+            .unwrap();
+            
+        Self { store: Box::new(store) }
+    }
 }
 
 #[async_trait]
-impl Seeder for S3Seeder {
+impl Seeder for ObjectSeeder {
     fn store_name(&self) -> String { String::from("S3") }
-    async fn seed(&self, instruction: Instruction) {}
+    async fn seed(&self, instruction: Instruction) {
+        let path = object_store::path::Path::from("/sunflower");
+        let payload = object_store::PutPayload::from_static(b"hey!");
+
+        println!("Right before put");
+        let put_result = self.store
+            .put(&path, payload)
+            .await
+            .unwrap();
+    }
 }
 
-impl From<S3Seeder> for Box<dyn Seeder> {
-    fn from(value: S3Seeder) -> Self { Box::new(value) }
+impl From<ObjectSeeder> for Box<dyn Seeder> {
+    fn from(value: ObjectSeeder) -> Self { Box::new(value) }
 }
 
 struct FileSeeder {
@@ -287,11 +310,11 @@ impl From<FileSeeder> for Box<dyn Seeder> {
 
 #[derive(Debug)]
 enum StoreKind {
-    S3,
     sqs,
-    SqlServer,
+    File,
+    Object,
     DuckDB,
-    File
+    SqlServer,
 }
 
 impl FromStr for StoreKind {
@@ -304,7 +327,7 @@ impl FromStr for StoreKind {
             "sqs" => Self::sqs,
             "file" => Self::File,
             "ms" => Self::SqlServer,
-            "s3" => Self::S3,
+            "s3" => Self::Object,
             "duckdb" => Self::DuckDB,
             _ => panic!("unknown store: received store {store_name}"),
         };
@@ -336,7 +359,7 @@ impl StoreRegistry for str {
         // implement Into<Box> for every seeder. This will only result in
         // a code asthetic improvement
         let seeder: Box<dyn Seeder> = match store_kind {
-            S3 => S3Seeder::new(url).await.into(),
+            Object => ObjectSeeder::new(url).await.into(),
             sqs => SQSSeeder::new(url).await.into(),
             File => FileSeeder::new(url).into(),
             SqlServer => {
@@ -349,8 +372,6 @@ impl StoreRegistry for str {
             }
         };
         
-        // let seeder = Box::new(seeder);
-
         seeders.push(seeder);
 
         seeders
@@ -490,25 +511,28 @@ mod tests {
             .location
             .unwrap();
 
-        // let plower = Plower::new("s3://localhost:4566").await;
-        // // let recipe = "crops ['fertilizer']";
-        // plower.seed("s3").await;
+        let plower = Plower::new("s3://localhost:4566").await;
+        // let recipe = "crops ['fertilizer']";
+        plower.seed("S3").await;
 
-        // let queues = client.list_queues().send().await.unwrap();
-        //
-        // let msgs = client
-        //     .receive_message()
-        //     .queue_url("http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/crops")
-        //     .max_number_of_messages(1)
-        //     .send()
-        //     .await
-        //     .unwrap()
-        //     .messages
-        //     .unwrap();
-        // let actual_msg = msgs.first().unwrap().body().unwrap();
-        //
-        // assert_eq!(actual_msg, "fertilizer");
-        assert!(false)
+        let store = object_store::aws::AmazonS3Builder::from_env()
+            .with_bucket_name("farm")
+            .with_access_key_id("test")
+            .with_secret_access_key("test")
+            .with_endpoint("http://localhost:4566")
+            .with_allow_http(true)
+            .build()
+            .unwrap();
+
+        let object_path = object_store::path::Path::from("/sunflower");
+        let get_result = store.get(&object_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+
+        assert_eq!(get_result, "hey!");
     }
 
     #[tokio::test]

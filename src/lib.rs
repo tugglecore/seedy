@@ -13,6 +13,7 @@ use tokio::fs::File;
 use parquet::arrow::async_writer::AsyncArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use object_store::{GetResultPayload, ObjectStore};
+use unftp_sbe_fs::ServerExt;
 
 /*
  *
@@ -242,7 +243,6 @@ impl Seeder for ObjectSeeder {
         let path = object_store::path::Path::from("/sunflower");
         let payload = object_store::PutPayload::from_static(b"hey!");
 
-        println!("Right before put");
         let put_result = self.store
             .put(&path, payload)
             .await
@@ -598,5 +598,17 @@ mod tests {
         let actual_batch = reader.next().unwrap().unwrap();
         println!("Record Batch {actual_batch:#?}");
         assert_eq!(actual_batch, expected_batch);
+    }
+
+    #[tokio::test]
+    async fn test_seeding_a_ftp_server() {
+        tokio::task::spawn(async {
+           let ftp_home = std::env::temp_dir();
+           let server = libunftp::Server::with_fs(ftp_home)
+               .build()
+               .unwrap();
+
+        server.listen("127.0.0.1:2121").await;
+        });
     }
 }

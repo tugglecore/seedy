@@ -14,6 +14,8 @@ use parquet::arrow::async_writer::AsyncArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use object_store::{GetResultPayload, ObjectStore};
 use unftp_sbe_fs::ServerExt;
+use suppaftp::FtpStream;
+
 
 /*
  *
@@ -602,13 +604,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_seeding_a_ftp_server() {
-        tokio::task::spawn(async {
-           let ftp_home = std::env::temp_dir();
-           let server = libunftp::Server::with_fs(ftp_home)
-               .build()
-               .unwrap();
+        let mut ftp_stream = FtpStream::connect("127.0.0.1:2121").unwrap();
 
-        server.listen("127.0.0.1:2121").await;
-        });
+        let _ = ftp_stream.login("t", "k").unwrap();
+
+        let contents = ftp_stream.list(Some(".")).unwrap();
+        //
+        // println!("{contents:#?}");
     }
 }

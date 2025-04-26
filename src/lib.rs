@@ -608,7 +608,9 @@ mod tests {
 
         let _ = ftp_stream.login("t", "k").unwrap();
 
+        println!("BEfore I am here");
         let contents = ftp_stream.list(Some(".")).unwrap();
+        println!("I am not here");
         //
         // println!("{contents:#?}");
     }

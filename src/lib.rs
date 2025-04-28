@@ -612,6 +612,7 @@ mod tests {
         let contents = ftp_stream.list(Some(".")).unwrap();
         println!("I am not here");
         //
-        // println!("{contents:#?}");
+        println!("{contents:#?}");
+        assert!(false);
     }
 }

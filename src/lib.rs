@@ -1,25 +1,25 @@
+use arrow_array::record_batch;
 use async_trait::async_trait;
 use duckdb::{Connection, Result};
+use libunftp::Server;
+use object_store::local::LocalFileSystem;
+use object_store::{GetResultPayload, ObjectStore};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::async_writer::AsyncArrowWriter;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
+use suppaftp::AsyncFtpStream;
+use suppaftp::{FtpStream, list};
 use tiberius::{AuthMethod, Client, Config, Query};
+use tokio::fs::File;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
-use std::io::{Write, Read, Seek, SeekFrom};
-use arrow_array::record_batch;
-use std::path::PathBuf;
-use tokio::fs::File;
 use tokio::time::timeout;
-use std::time::Duration;
-use parquet::arrow::async_writer::AsyncArrowWriter;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use object_store::{GetResultPayload, ObjectStore};
-use libunftp::Server;
+use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use unftp_sbe_fs::ServerExt;
-use suppaftp::{FtpStream, list};
-use suppaftp::{AsyncFtpStream};
-
 
 /*
  *
@@ -32,10 +32,11 @@ use suppaftp::{AsyncFtpStream};
 /******************************************************************************************************************************************
  *************************************************************** STORE ********************************************************************
 ******************************************************************************************************************************************/
+
 #[async_trait]
-trait Store {
+trait Store: Send + Sync {
     async fn plant(&self, seed: &str);
-    fn store_name(&self) -> String;
+    // fn store_name(&self) -> String;
 }
 
 struct SqlServerStore {
@@ -65,14 +66,10 @@ impl Store for SqlServerStore {
             "
                 TRUNCATE TABLE tempdb.dbo.canvas;
                 INSERT INTO tempdb.dbo.canvas VALUES (234);
-            "
+            ",
         );
         let mut conn = self.connection.lock().await;
         let results = query.execute(&mut conn).await.unwrap();
-    }
-
-    fn store_name(&self) -> String {
-        String::from("ms")
     }
 }
 
@@ -114,11 +111,51 @@ impl Store for DuckStore {
         let mut receiver = self.row_receiver.lock().await;
         receiver.recv().await;
     }
+}
 
-    fn store_name(&self) -> String {
-        String::from("duckdb")
+#[async_trait]
+impl<T: ObjectStore> Store for T {
+    async fn plant(&self, seed: &str) {
+        let batch = record_batch!(("a", Int32, [1, 2, 3])).unwrap();
+
+        let mut buffer: Vec<u8> = vec![];
+        let mut writer = AsyncArrowWriter::try_new(&mut buffer, batch.schema(), None).unwrap();
+
+        writer.write(&batch).await.unwrap();
+        writer.close().await.unwrap();
+
+        let path = object_store::path::Path::from("/course.parquet");
+        let payload = object_store::PutPayload::from(buffer);
+        let put_result = self.put(&path, payload).await.unwrap();
     }
 }
+
+// struct FtpStore {
+//     client: Mutex<FtpStream>
+// }
+//
+// impl FtpStore {
+//     fn new () -> Self {
+//         let client = Mutex::new(
+//             FtpStream::connect("127.0.0.1:2121").unwrap()
+//         );
+//         Self { client }
+//     }
+// }
+//
+// #[async_trait]
+// impl Store for FtpStore {
+//     async fn plant(&self, seed: &str) {
+//         let mut r = b"it happens";
+//
+//         self
+//             .client
+//             .lock()
+//             .await
+//             .put_file("happens.txt", &mut r.as_slice())
+//             .unwrap();
+//     }
+// }
 
 /******************************************************************************************************************************************
  ***************************************************** INSTRUCTION & RECIPE ************************************************************
@@ -149,28 +186,37 @@ trait Seeder: Send + Sync {
 }
 
 struct DatabaseSeeder {
-    store: Box<dyn Store + Send + Sync>,
+    store_name: String,
+    store: Box<dyn Store>,
 }
 
 impl From<DatabaseSeeder> for Box<dyn Seeder> {
-    fn from(value: DatabaseSeeder) -> Self { Box::new(value) }
+    fn from(value: DatabaseSeeder) -> Self {
+        Box::new(value)
+    }
 }
 
 impl DatabaseSeeder {
     fn new(store: Box<dyn Store + Send + Sync>) -> Self {
-        Self { store }
+        Self {
+            store_name: String::from("ms"),
+            store,
+        }
     }
 
     fn for_duckdb(connection: Connection) -> Self {
         let store = Box::new(DuckStore::from_connection(connection));
-        Self { store }
+        Self {
+            store_name: String::from("duckdb"),
+            store,
+        }
     }
 }
 
 #[async_trait]
 impl Seeder for DatabaseSeeder {
     fn store_name(&self) -> String {
-        self.store.store_name()
+        self.store_name.clone()
     }
 
     async fn seed(&self, instruction: Instruction) {
@@ -220,11 +266,13 @@ impl Seeder for SQSSeeder {
 }
 
 impl From<SQSSeeder> for Box<dyn Seeder> {
-    fn from(value: SQSSeeder) -> Self { Box::new(value) }
+    fn from(value: SQSSeeder) -> Self {
+        Box::new(value)
+    }
 }
 
 struct ObjectSeeder {
-    store: Box<dyn ObjectStore>
+    store: Box<dyn ObjectStore>,
 }
 
 impl ObjectSeeder {
@@ -237,79 +285,98 @@ impl ObjectSeeder {
             .with_allow_http(true)
             .build()
             .unwrap();
-            
-        Self { store: Box::new(store) }
+
+        Self {
+            store: Box::new(store),
+        }
     }
 }
 
 #[async_trait]
 impl Seeder for ObjectSeeder {
-    fn store_name(&self) -> String { String::from("S3") }
+    fn store_name(&self) -> String {
+        String::from("S3")
+    }
     async fn seed(&self, instruction: Instruction) {
         let path = object_store::path::Path::from("/sunflower");
         let payload = object_store::PutPayload::from_static(b"hey!");
 
-        let put_result = self.store
-            .put(&path, payload)
-            .await
-            .unwrap();
+        let put_result = self.store.put(&path, payload).await.unwrap();
     }
 }
 
 impl From<ObjectSeeder> for Box<dyn Seeder> {
-    fn from(value: ObjectSeeder) -> Self { Box::new(value) }
+    fn from(value: ObjectSeeder) -> Self {
+        Box::new(value)
+    }
 }
 
 struct FileSeeder {
-    path: PathBuf
+    name: String,
+    store: Box<dyn Store>, // path: PathBuf
 }
 
 impl FileSeeder {
     fn new(url: url::Url) -> Self {
-        Self { path: PathBuf::from(url.path()) }
+        match url.scheme() {
+            "file" => Self {
+                name: String::from("file"),
+                store: Box::new(LocalFileSystem::new_with_prefix(url.path()).unwrap()),
+            },
+            "s3" => {
+                let store = object_store::aws::AmazonS3Builder::from_env()
+                    .with_bucket_name("farm")
+                    .with_access_key_id("test")
+                    .with_secret_access_key("test")
+                    .with_endpoint("http://localhost:4566")
+                    .with_allow_http(true)
+                    .build()
+                    .unwrap();
+                Self {
+                    name: String::from("S3"),
+                    store: Box::new(store),
+                }
+            }
+            // "ftp" => {
+            //     let store = Box::new(FtpStore::new());
+            //     Self {
+            //         store,
+            //         name: String::from("ftp")
+            //     }
+            // }
+            _ => unreachable!("unknown store"),
+        }
     }
 
     async fn seed_parquet(&self, instruction: Instruction) {
-        let batch = record_batch!(
-            ("a", Int32, [1, 2, 3])
-        ).unwrap();
-
-        println!("what we have in the batch: {batch:#?}");
-        let filename = self.path.join("course.parquet");
-        println!("What path did we create {filename:#?}");
-
-        let mut file = File::create(filename).await.unwrap();
-
-        let mut writer = AsyncArrowWriter::try_new(
-            &mut file,
-            batch.schema(),
-            None
-        ).unwrap();
-
-        writer.write(&batch).await.unwrap();
-        writer.close().await.unwrap();
+        self.store.plant("something").await;
     }
 }
 
 #[async_trait]
 impl Seeder for FileSeeder {
-    fn store_name(&self) -> String { String::from("file") }
+    fn store_name(&self) -> String {
+        self.name.clone()
+    }
 
     async fn seed(&self, instruction: Instruction) {
         let format = String::from("parquet");
 
         match format.as_str() {
             "parquet" => self.seed_parquet(instruction).await,
-            _ => panic!("unknown file format")
+            _ => panic!("unknown file format"),
         };
-   }
-
+    }
 }
 
 impl From<FileSeeder> for Box<dyn Seeder> {
-    fn from(value: FileSeeder) -> Self { Box::new(value) }
+    fn from(value: FileSeeder) -> Self {
+        Box::new(value)
+    }
 }
 
+// struct FtpSeeder {
+//     client
 /******************************************************************************************************************************************
  *************************************************** STORE KIND & REGISTRY ***************************************************************
 ******************************************************************************************************************************************/
@@ -318,7 +385,6 @@ impl From<FileSeeder> for Box<dyn Seeder> {
 enum StoreKind {
     sqs,
     File,
-    Object,
     DuckDB,
     SqlServer,
 }
@@ -331,9 +397,8 @@ impl FromStr for StoreKind {
     fn from_str(store_name: &str) -> Result<Self, Self::Err> {
         let store = match store_name {
             "sqs" => Self::sqs,
-            "file" => Self::File,
+            "s3" | "file" => Self::File,
             "ms" => Self::SqlServer,
-            "s3" => Self::Object,
             "duckdb" => Self::DuckDB,
             _ => panic!("unknown store: received store {store_name}"),
         };
@@ -347,7 +412,6 @@ trait StoreRegistry {
     async fn build_seeders(&self) -> Vec<Box<dyn Seeder>>;
 }
 
-
 #[async_trait]
 impl StoreRegistry for str {
     async fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
@@ -355,9 +419,7 @@ impl StoreRegistry for str {
 
         let mut seeders = vec![];
 
-        // println!("What is self: {self:#?}");
         let url = url::Url::parse(self).unwrap();
-        // println!("Url is: {url:#?}");
 
         let store_kind = StoreKind::from_str(url.scheme()).unwrap();
 
@@ -365,9 +427,8 @@ impl StoreRegistry for str {
         // implement Into<Box> for every seeder. This will only result in
         // a code asthetic improvement
         let seeder: Box<dyn Seeder> = match store_kind {
-            Object => ObjectSeeder::new(url).await.into(),
-            sqs => SQSSeeder::new(url).await.into(),
             File => FileSeeder::new(url).into(),
+            sqs => SQSSeeder::new(url).await.into(),
             SqlServer => {
                 let store = SqlServerStore::new(url).await;
                 DatabaseSeeder::new(Box::new(store)).into()
@@ -377,7 +438,7 @@ impl StoreRegistry for str {
                 DatabaseSeeder::for_duckdb(connection).into()
             }
         };
-        
+
         seeders.push(seeder);
 
         seeders
@@ -416,6 +477,7 @@ impl Plower {
         let seeder_name = self.seeders.first().unwrap().store_name();
         println!("seeder name is: {seeder_name}");
         for instruction in instructions {
+            println!("{instruction:#?}");
             let seeder = self
                 .seeders
                 .iter()
@@ -443,20 +505,18 @@ mod tests {
 
     async fn spin_up_ftp_server() {
         let handle = tokio::spawn(async {
-        let server = Server::with_fs("/tmp")
-            .build()
-            .unwrap();
+            let server = Server::with_fs("/tmp").build().unwrap();
 
-        server.listen("127.0.0.1:2121").await.unwrap();
+            server.listen("127.0.0.1:2121").await.unwrap();
         });
-        // handle.await;
+
         let healthcheck = tokio::spawn(async {
-            let ftp_stream = AsyncFtpStream::connect("127.0.0.1:2121")
-                .await
-                .unwrap();
+            let ftp_stream = AsyncFtpStream::connect("127.0.0.1:2121").await.unwrap();
         });
 
-        timeout(Duration::from_millis(3000), healthcheck).await.unwrap();
+        timeout(Duration::from_millis(3000), healthcheck)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -521,6 +581,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seeding_s3() {
+        let expected_batch = record_batch!(("a", Int32, [1, 2, 3])).unwrap();
         let config = aws_config::from_env()
             .endpoint_url("http://s3.localhost.localstack.cloud:4566")
             .load()
@@ -548,15 +609,22 @@ mod tests {
             .build()
             .unwrap();
 
-        let object_path = object_store::path::Path::from("/sunflower");
-        let get_result = store.get(&object_path)
+        let object_path = object_store::path::Path::from("/course.parquet");
+        let get_result = store
+            .get(&object_path)
             .await
             .unwrap()
             .bytes()
             .await
             .unwrap();
 
-        assert_eq!(get_result, "hey!");
+        let mut reader = ParquetRecordBatchReaderBuilder::try_new(get_result)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let actual_batch = reader.next().unwrap().unwrap();
+        assert_eq!(actual_batch, expected_batch);
     }
 
     #[tokio::test]
@@ -575,7 +643,7 @@ mod tests {
             "
                 DROP TABLE IF EXISTS tempdb.dbo.canvas;
                 CREATE TABLE tempdb.dbo.canvas (a int);
-            "
+            ",
         );
         // let query = Query::new("INSERT INTO tempdb.dbo.canvas VALUES (234)");
         let results = query.execute(&mut client).await.unwrap();
@@ -583,9 +651,8 @@ mod tests {
         let plower = Plower::new("ms://sa:Seedy2025@localhost:1433").await;
         plower.seed("ms").await;
 
-        let actual_val = client.simple_query(
-            "select a from tempdb.dbo.canvas"
-        )
+        let actual_val = client
+            .simple_query("select a from tempdb.dbo.canvas")
             .await
             .unwrap()
             .into_row()
@@ -598,15 +665,12 @@ mod tests {
         assert_eq!(actual_val, 234);
     }
 
-
     #[tokio::test]
     async fn test_building_parquet() {
         let tmpdir = tempfile::TempDir::new().unwrap();
         let tmpdir = tmpdir.path().to_str().unwrap();
         let file_store = "file://".to_string() + tmpdir;
-        let expected_batch = record_batch!(
-            ("a", Int32, [1, 2, 3])
-        ).unwrap();
+        let expected_batch = record_batch!(("a", Int32, [1, 2, 3])).unwrap();
 
         let plower = Plower::new(&file_store).await;
         // let recipe = "file { course.parquet <parquet> [ { topic: Chemistry } ] }";
@@ -627,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn test_seeding_a_ftp_server() {
         spin_up_ftp_server().await;
-        // let mut ftp_stream = FtpStream::connect("127.0.0.1:2121").unwrap();
+
         //
         // let _ = ftp_stream.login("t", "k").unwrap();
         //
@@ -640,14 +704,15 @@ mod tests {
         //     .collect::<Vec<_>>()
         //     .is_empty();
         //
-        // assert!(false);
-        //
         // // let mut r = b"it happens";
         // // ftp_stream.put_file("happens.txt", &mut r.as_slice()).unwrap();
         //
-        // // let plower = Plower::new("ftp://user:testing@localhost").await;
-        // // let recipe = "ftp { course.parquet <parquet> [ { topic: Chemistry } ] }";
-        // // plower.seed("ftp").await;
+
+        // let plower = Plower::new("ftp://user:testing@localhost").await;
+        // let recipe = "ftp { cars.parquet <parquet> [ { make: Honda } ] }";
+        // plower.seed("ftp").await;
+
+        // let mut ftp_stream = FtpStream::connect("127.0.0.1:2121").unwrap();
         //
         // let contents = ftp_stream
         //     .list(None)

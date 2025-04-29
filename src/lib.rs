@@ -17,6 +17,7 @@ use tokio::fs::File;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use unftp_sbe_fs::ServerExt;
@@ -130,32 +131,32 @@ impl<T: ObjectStore> Store for T {
     }
 }
 
-// struct FtpStore {
-//     client: Mutex<FtpStream>
-// }
-//
-// impl FtpStore {
-//     fn new () -> Self {
-//         let client = Mutex::new(
-//             FtpStream::connect("127.0.0.1:2121").unwrap()
-//         );
-//         Self { client }
-//     }
-// }
-//
-// #[async_trait]
-// impl Store for FtpStore {
-//     async fn plant(&self, seed: &str) {
-//         let mut r = b"it happens";
-//
-//         self
-//             .client
-//             .lock()
-//             .await
-//             .put_file("happens.txt", &mut r.as_slice())
-//             .unwrap();
-//     }
-// }
+struct FtpStore {
+    client: Mutex<FtpStream>,
+}
+
+impl FtpStore {
+    fn new() -> Self {
+        let mut client = FtpStream::connect("127.0.0.1:2121").unwrap();
+        client.login("t", "k").unwrap();
+
+        let client = Mutex::new(client);
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl Store for FtpStore {
+    async fn plant(&self, seed: &str) {
+        let mut r = b"it happens";
+
+        self.client
+            .lock()
+            .await
+            .put_file("happens.txt", &mut r.as_slice())
+            .unwrap();
+    }
+}
 
 /******************************************************************************************************************************************
  ***************************************************** INSTRUCTION & RECIPE ************************************************************
@@ -337,13 +338,13 @@ impl FileSeeder {
                     store: Box::new(store),
                 }
             }
-            // "ftp" => {
-            //     let store = Box::new(FtpStore::new());
-            //     Self {
-            //         store,
-            //         name: String::from("ftp")
-            //     }
-            // }
+            "ftp" => {
+                let store = Box::new(FtpStore::new());
+                Self {
+                    store,
+                    name: String::from("ftp"),
+                }
+            }
             _ => unreachable!("unknown store"),
         }
     }
@@ -397,7 +398,7 @@ impl FromStr for StoreKind {
     fn from_str(store_name: &str) -> Result<Self, Self::Err> {
         let store = match store_name {
             "sqs" => Self::sqs,
-            "s3" | "file" => Self::File,
+            "s3" | "ftp" | "file" => Self::File,
             "ms" => Self::SqlServer,
             "duckdb" => Self::DuckDB,
             _ => panic!("unknown store: received store {store_name}"),
@@ -511,7 +512,7 @@ mod tests {
         });
 
         let healthcheck = tokio::spawn(async {
-            let ftp_stream = AsyncFtpStream::connect("127.0.0.1:2121").await.unwrap();
+            let mut ftp_stream = AsyncFtpStream::connect("127.0.0.1:2121").await.unwrap();
         });
 
         timeout(Duration::from_millis(3000), healthcheck)
@@ -688,43 +689,27 @@ mod tests {
         assert_eq!(actual_batch, expected_batch);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_seeding_a_ftp_server() {
         spin_up_ftp_server().await;
 
-        //
-        // let _ = ftp_stream.login("t", "k").unwrap();
-        //
-        // let is_server_empty = ftp_stream
-        //     .list(None)
-        //     .unwrap()
-        //     .iter()
-        //     .map(|f| list::File::try_from(f.as_str()).ok().unwrap())
-        //     .map(|f| f.name().to_string())
-        //     .collect::<Vec<_>>()
-        //     .is_empty();
-        //
-        // // let mut r = b"it happens";
-        // // ftp_stream.put_file("happens.txt", &mut r.as_slice()).unwrap();
-        //
+        let plower = Plower::new("ftp://user:testing@localhost").await;
+        let recipe = "ftp { cars.parquet <parquet> [ { make: Honda } ] }";
+        plower.seed("ftp").await;
 
-        // let plower = Plower::new("ftp://user:testing@localhost").await;
-        // let recipe = "ftp { cars.parquet <parquet> [ { make: Honda } ] }";
-        // plower.seed("ftp").await;
+        let mut ftp_stream = FtpStream::connect("127.0.0.1:2121").unwrap();
 
-        // let mut ftp_stream = FtpStream::connect("127.0.0.1:2121").unwrap();
-        //
-        // let contents = ftp_stream
-        //     .list(None)
-        //     .unwrap()
-        //     .iter()
-        //     .map(|f| list::File::try_from(f.as_str()).ok().unwrap())
-        //     .map(|f| f.name().to_string())
-        //     .collect::<Vec<_>>();
-        //
-        // let filename = contents.first().unwrap();
-        //
-        // println!("{filename:#?}");
-        // assert!(false);
+        ftp_stream.login("t", "k").unwrap();
+        let contents = ftp_stream
+            .list(None)
+            .unwrap()
+            .iter()
+            .map(|f| list::File::try_from(f.as_str()).ok().unwrap())
+            .map(|f| f.name().to_string())
+            .collect::<Vec<_>>();
+
+        let contents = contents.first().unwrap().as_str();
+
+        assert_eq!(contents, "happens.txt");
     }
 }

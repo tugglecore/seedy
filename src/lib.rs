@@ -1,26 +1,17 @@
 use arrow_array::record_batch;
 use async_trait::async_trait;
 use duckdb::{Connection, Result};
-use libunftp::Server;
 use object_store::local::LocalFileSystem;
-use object_store::{GetResultPayload, ObjectStore};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use object_store::ObjectStore;
 use parquet::arrow::async_writer::AsyncArrowWriter;
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::io::Write;
 use std::str::FromStr;
-use std::time::Duration;
-use suppaftp::AsyncFtpStream;
-use suppaftp::{FtpStream, list};
+use suppaftp::FtpStream;
 use tiberius::{AuthMethod, Client, Config, Query};
-use tokio::fs::File;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tokio::task::JoinHandle;
-use tokio::time::timeout;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
-use unftp_sbe_fs::ServerExt;
 
 /*
  *
@@ -148,7 +139,7 @@ impl FtpStore {
 #[async_trait]
 impl Store for FtpStore {
     async fn plant(&self, seed: &str) {
-        let mut r = b"it happens";
+        let r = b"it happens";
 
         self.client
             .lock()
@@ -503,6 +494,13 @@ impl Plower {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unftp_sbe_fs::ServerExt;
+    use libunftp::Server;
+    use suppaftp::AsyncFtpStream;
+    use tokio::time::timeout;
+    use std::time::Duration;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use suppaftp::list;
 
     async fn spin_up_ftp_server() {
         let handle = tokio::spawn(async {
@@ -512,7 +510,7 @@ mod tests {
         });
 
         let healthcheck = tokio::spawn(async {
-            let mut ftp_stream = AsyncFtpStream::connect("127.0.0.1:2121").await.unwrap();
+            let ftp_stream = AsyncFtpStream::connect("127.0.0.1:2121").await.unwrap();
         });
 
         timeout(Duration::from_millis(3000), healthcheck)

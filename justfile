@@ -5,9 +5,14 @@ setup-env:
     -v /var/run/docker.sock:/var/run/docker.sock \
     localstack/localstack
 
+    # docker run -d --rm -e UNFTP_LOG_LEVEL=info -e UNFTP_PASSIVE_PORTS=50000-50005 -p 2121:2121 -p 50000-50020:50000-50020 -p 8080:8080 -e UNFTP_AUTH_TYPE=anonymous -ti bolcom/unftp:v0.15.1-alpine
+
     podman run -d --rm \
         -e 'ACCEPT_EULA=1' -e 'MSSQL_SA_PASSWORD=Seedy2025' \
         -p 1433:1433 \
         --name azuresqledge \
         mcr.microsoft.com/azure-sql-edge
 
+teardown:
+    sudo docker rm -f $(docker ps -aq)
+    podman rm --force --all

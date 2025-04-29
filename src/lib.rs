@@ -10,11 +10,15 @@ use std::io::{Write, Read, Seek, SeekFrom};
 use arrow_array::record_batch;
 use std::path::PathBuf;
 use tokio::fs::File;
+use tokio::time::timeout;
+use std::time::Duration;
 use parquet::arrow::async_writer::AsyncArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use object_store::{GetResultPayload, ObjectStore};
+use libunftp::Server;
 use unftp_sbe_fs::ServerExt;
-use suppaftp::FtpStream;
+use suppaftp::{FtpStream, list};
+use suppaftp::{AsyncFtpStream};
 
 
 /*
@@ -437,6 +441,24 @@ impl Plower {
 mod tests {
     use super::*;
 
+    async fn spin_up_ftp_server() {
+        let handle = tokio::spawn(async {
+        let server = Server::with_fs("/tmp")
+            .build()
+            .unwrap();
+
+        server.listen("127.0.0.1:2121").await.unwrap();
+        });
+        // handle.await;
+        let healthcheck = tokio::spawn(async {
+            let ftp_stream = AsyncFtpStream::connect("127.0.0.1:2121")
+                .await
+                .unwrap();
+        });
+
+        timeout(Duration::from_millis(3000), healthcheck).await.unwrap();
+    }
+
     #[tokio::test]
     async fn auto_discover_tables() {
         let connection = Connection::open_in_memory().unwrap();
@@ -604,15 +626,40 @@ mod tests {
 
     #[tokio::test]
     async fn test_seeding_a_ftp_server() {
-        let mut ftp_stream = FtpStream::connect("127.0.0.1:2121").unwrap();
-
-        let _ = ftp_stream.login("t", "k").unwrap();
-
-        println!("BEfore I am here");
-        let contents = ftp_stream.list(Some(".")).unwrap();
-        println!("I am not here");
+        spin_up_ftp_server().await;
+        // let mut ftp_stream = FtpStream::connect("127.0.0.1:2121").unwrap();
         //
-        println!("{contents:#?}");
-        assert!(false);
+        // let _ = ftp_stream.login("t", "k").unwrap();
+        //
+        // let is_server_empty = ftp_stream
+        //     .list(None)
+        //     .unwrap()
+        //     .iter()
+        //     .map(|f| list::File::try_from(f.as_str()).ok().unwrap())
+        //     .map(|f| f.name().to_string())
+        //     .collect::<Vec<_>>()
+        //     .is_empty();
+        //
+        // assert!(false);
+        //
+        // // let mut r = b"it happens";
+        // // ftp_stream.put_file("happens.txt", &mut r.as_slice()).unwrap();
+        //
+        // // let plower = Plower::new("ftp://user:testing@localhost").await;
+        // // let recipe = "ftp { course.parquet <parquet> [ { topic: Chemistry } ] }";
+        // // plower.seed("ftp").await;
+        //
+        // let contents = ftp_stream
+        //     .list(None)
+        //     .unwrap()
+        //     .iter()
+        //     .map(|f| list::File::try_from(f.as_str()).ok().unwrap())
+        //     .map(|f| f.name().to_string())
+        //     .collect::<Vec<_>>();
+        //
+        // let filename = contents.first().unwrap();
+        //
+        // println!("{filename:#?}");
+        // assert!(false);
     }
 }

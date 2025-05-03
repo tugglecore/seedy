@@ -405,7 +405,7 @@ trait StoreRegistry {
 }
 
 #[async_trait]
-impl StoreRegistry for str {
+impl StoreRegistry for &str {
     async fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
         use StoreKind::*;
 
@@ -438,6 +438,13 @@ impl StoreRegistry for str {
 }
 
 #[async_trait]
+impl StoreRegistry for &String {
+    async fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
+        self.as_str().build_seeders().await
+    }
+}
+
+#[async_trait]
 impl StoreRegistry for String {
     async fn build_seeders(&self) -> Vec<Box<dyn Seeder>> {
         self.as_str().build_seeders().await
@@ -454,7 +461,7 @@ struct Plower {
 
 impl Plower {
     // TODO: Implement trait objects to allow list of distinct types
-    pub async fn new<S: StoreRegistry + ?Sized>(store_registry: &S) -> Self {
+    pub async fn new<S: StoreRegistry>(store_registry: S) -> Self {
         let seeders = store_registry.build_seeders().await;
 
         Self { seeders }
@@ -464,10 +471,7 @@ impl Plower {
         let instructions = prep_recipe(recipe);
 
         let seeder_count = self.seeders.len();
-        println!("INstruction are: {instructions:#?}");
-        println!("How many seeders we have: {seeder_count:#?}");
         let seeder_name = self.seeders.first().unwrap().store_name();
-        println!("seeder name is: {seeder_name}");
         for instruction in instructions {
             println!("{instruction:#?}");
             let seeder = self

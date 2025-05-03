@@ -1,8 +1,8 @@
 use arrow_array::record_batch;
 use async_trait::async_trait;
 use duckdb::{Connection, Result};
-use object_store::local::LocalFileSystem;
 use object_store::ObjectStore;
+use object_store::local::LocalFileSystem;
 use parquet::arrow::async_writer::AsyncArrowWriter;
 use std::io::Write;
 use std::str::FromStr;
@@ -494,18 +494,18 @@ impl Plower {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use unftp_sbe_fs::ServerExt;
     use libunftp::Server;
-    use suppaftp::AsyncFtpStream;
-    use tokio::time::timeout;
-    use std::time::Duration;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::time::Duration;
+    use suppaftp::AsyncFtpStream;
     use suppaftp::list;
+    use tokio::time::timeout;
+    use unftp_sbe_fs::ServerExt;
 
     async fn spin_up_ftp_server() {
         let handle = tokio::spawn(async {
-        let tmpdir = tempfile::TempDir::new().unwrap();
-        let tmpdir = tmpdir.path().to_str().unwrap().to_string();
+            let tmpdir = tempfile::TempDir::new().unwrap();
+            let tmpdir = tmpdir.path().to_str().unwrap().to_string();
             let server = Server::with_fs(tmpdir).build().unwrap();
 
             server.listen("127.0.0.1:2121").await.unwrap();
@@ -596,7 +596,7 @@ mod tests {
             .unwrap()
             .location
             .unwrap();
-        
+
         let plower = Plower::new("s3://localhost:4566").await;
         // let recipe = "crops ['fertilizer']";
         plower.seed("S3").await;

@@ -504,7 +504,9 @@ mod tests {
 
     async fn spin_up_ftp_server() {
         let handle = tokio::spawn(async {
-            let server = Server::with_fs("/tmp").build().unwrap();
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let tmpdir = tmpdir.path().to_str().unwrap().to_string();
+            let server = Server::with_fs(tmpdir).build().unwrap();
 
             server.listen("127.0.0.1:2121").await.unwrap();
         });
@@ -594,7 +596,7 @@ mod tests {
             .unwrap()
             .location
             .unwrap();
-
+        
         let plower = Plower::new("s3://localhost:4566").await;
         // let recipe = "crops ['fertilizer']";
         plower.seed("S3").await;

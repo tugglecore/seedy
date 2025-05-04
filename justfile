@@ -13,6 +13,12 @@ setup-env:
         --name azuresqledge \
         mcr.microsoft.com/azure-sql-edge
 
+    podman run -d --rm \
+        --name some-postgres \
+        -e POSTGRES_PASSWORD=mysecretpassword \
+        -p 5432:5432 \
+        postgres
+
 teardown:
     sudo docker rm -f $(docker ps -aq)
     podman rm --force --all

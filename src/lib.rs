@@ -1,6 +1,6 @@
 use arrow_array::record_batch;
 use async_trait::async_trait;
-use duckdb::{Connection, Result};
+use duckdb::{Result};
 use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
 use parquet::arrow::async_writer::AsyncArrowWriter;
@@ -12,6 +12,9 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
+use sqlx::any::install_default_drivers;
+use sqlx::AnyConnection;
+use sqlx::prelude::*;
 
 /*
  *
@@ -28,7 +31,6 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 #[async_trait]
 trait Store: Send + Sync {
     async fn plant(&self, seed: &str);
-    // fn store_name(&self) -> String;
 }
 
 struct SqlServerStore {
@@ -72,7 +74,7 @@ struct DuckStore {
 }
 
 impl DuckStore {
-    pub fn from_connection(connection: Connection) -> Self {
+    pub fn from_connection(connection: duckdb::Connection) -> Self {
         let (query_sender, mut query_receiver) = channel(100);
         let (row_sender, row_receiver) = channel(100);
         let row_receiver = Mutex::new(row_receiver);
@@ -91,7 +93,7 @@ impl DuckStore {
     }
 
     fn new() -> Self {
-        let connection = Connection::open_in_memory().unwrap();
+        let connection = duckdb::Connection::open_in_memory().unwrap();
         DuckStore::from_connection(connection)
     }
 }
@@ -149,6 +151,39 @@ impl Store for FtpStore {
     }
 }
 
+struct SpamStore {
+    connection: Mutex<AnyConnection>
+}
+
+impl SpamStore {
+    async fn new(url: url::Url) -> Self {
+        install_default_drivers();
+
+        let mut connection = AnyConnection::connect("postgres://postgres:mysecretpassword@localhost/postgres")
+            .await
+            .unwrap()
+            .into();
+
+
+        Self { connection }
+    }
+}
+
+#[async_trait]
+impl Store for SpamStore {
+
+    async fn plant(&self, seed: &str) {
+    use sqlx::Connection;
+        let mut connection = self.connection
+            .lock()
+            .await;
+
+        let _ = connection.execute("INSERT INTO show VALUES ('tmnt')")
+            .await
+            .unwrap();
+    }
+}
+
 /******************************************************************************************************************************************
  ***************************************************** INSTRUCTION & RECIPE ************************************************************
 ******************************************************************************************************************************************/
@@ -189,14 +224,24 @@ impl From<DatabaseSeeder> for Box<dyn Seeder> {
 }
 
 impl DatabaseSeeder {
-    fn new(store: Box<dyn Store + Send + Sync>) -> Self {
-        Self {
-            store_name: String::from("ms"),
-            store,
+    async fn new(url: url::Url) -> Self {
+        match url.scheme() {
+            "ms" => Self {
+                store_name: String::from("ms"),
+                store: Box::new(SqlServerStore::new(url).await),
+            },
+            "postgres" => {
+                let store = SpamStore::new(url).await;
+                Self {
+                    store_name: String::from("postgres"),
+                    store: Box::new(store),
+                }
+            }
+            _ => unreachable!("unknown store"),
         }
     }
 
-    fn for_duckdb(connection: Connection) -> Self {
+    fn for_duckdb(connection: duckdb::Connection) -> Self {
         let store = Box::new(DuckStore::from_connection(connection));
         Self {
             store_name: String::from("duckdb"),
@@ -378,7 +423,7 @@ enum StoreKind {
     sqs,
     File,
     DuckDB,
-    SqlServer,
+    Database,
 }
 
 impl FromStr for StoreKind {
@@ -390,7 +435,7 @@ impl FromStr for StoreKind {
         let store = match store_name {
             "sqs" => Self::sqs,
             "s3" | "ftp" | "file" => Self::File,
-            "ms" => Self::SqlServer,
+            "ms" | "postgres" => Self::Database,
             "duckdb" => Self::DuckDB,
             _ => panic!("unknown store: received store {store_name}"),
         };
@@ -421,12 +466,9 @@ impl StoreRegistry for &str {
         let seeder: Box<dyn Seeder> = match store_kind {
             File => FileSeeder::new(url).into(),
             sqs => SQSSeeder::new(url).await.into(),
-            SqlServer => {
-                let store = SqlServerStore::new(url).await;
-                DatabaseSeeder::new(Box::new(store)).into()
-            }
+            Database => DatabaseSeeder::new(url).await.into(),
             DuckDB => {
-                let connection = Connection::open_in_memory().unwrap();
+                let connection = duckdb::Connection::open_in_memory().unwrap();
                 DatabaseSeeder::for_duckdb(connection).into()
             }
         };
@@ -473,7 +515,6 @@ impl Plower {
         let seeder_count = self.seeders.len();
         let seeder_name = self.seeders.first().unwrap().store_name();
         for instruction in instructions {
-            println!("{instruction:#?}");
             let seeder = self
                 .seeders
                 .iter()
@@ -484,7 +525,7 @@ impl Plower {
         }
     }
 
-    fn from_duckdb(connection: &Connection) -> Self {
+    fn from_duckdb(connection: &duckdb::Connection) -> Self {
         let mut seeders: Vec<Box<dyn Seeder>> = vec![];
 
         let duckdb_connection = connection.try_clone().unwrap();
@@ -505,6 +546,9 @@ mod tests {
     use suppaftp::list;
     use tokio::time::timeout;
     use unftp_sbe_fs::ServerExt;
+    use sqlx::Connection;
+    use sqlx::Executor;
+    use sqlx::postgres::PgConnection;
 
     async fn spin_up_ftp_server() {
         let handle = tokio::spawn(async {
@@ -526,7 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_discover_tables() {
-        let connection = Connection::open_in_memory().unwrap();
+        let connection = duckdb::Connection::open_in_memory().unwrap();
         let _ = connection.execute_batch("CREATE TABLE a (id INTEGER);");
 
         let plower = Plower::from_duckdb(&connection);
@@ -715,5 +759,30 @@ mod tests {
         let contents = contents.first().unwrap().as_str();
 
         assert_eq!(contents, "happens.txt");
+    }
+
+    #[tokio::test]
+    async fn test_seeding_postgres() {
+        let mut connection = PgConnection::connect("postgres://postgres:mysecretpassword@localhost/postgres")
+            .await
+            .unwrap();
+
+        let _ = connection.execute(
+            "
+            DROP TABLE IF EXISTS show;
+            CREATE TABlE show (name text);
+        ")
+            .await
+            .unwrap();
+
+        let plower = Plower::new("postgres://postgres:mysecretpassword@localhost/postgres").await;
+        plower.seed("postgres").await;
+
+        let actual_value: (String,) = sqlx::query_as("Select name from show")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+
+        assert_eq!(actual_value.0, "tmnt");
     }
 }

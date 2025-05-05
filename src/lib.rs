@@ -7,6 +7,8 @@ use parquet::arrow::async_writer::AsyncArrowWriter;
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use russh::*;
+use russh_sftp::client::SftpSession;
 use sqlx::AnyConnection;
 use sqlx::any::install_default_drivers;
 use sqlx::prelude::*;
@@ -18,8 +20,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
-use russh::*;
-use russh_sftp::{client::SftpSession};
 
 /*
  *
@@ -251,6 +251,49 @@ impl Store for KafkaStore {
     }
 }
 
+struct SftpStore {
+    session: SftpSession,
+}
+
+impl SftpStore {
+    async fn new() -> Self {
+        struct Client;
+
+        impl client::Handler for Client {
+            type Error = eyre::Report;
+
+            async fn check_server_key(
+                &mut self,
+                server_public_key: &russh::keys::PublicKey,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+
+        let config = russh::client::Config::default();
+        let sh = Client {};
+        let mut session =
+            russh::client::connect(std::sync::Arc::new(config), ("localhost", 22), sh)
+                .await
+                .unwrap();
+
+        session.authenticate_password("foo", "pass").await.unwrap();
+
+        let channel = session.channel_open_session().await.unwrap();
+        channel.request_subsystem(true, "sftp").await.unwrap();
+        let session = SftpSession::new(channel.into_stream()).await.unwrap();
+
+        Self { session }
+    }
+}
+
+#[async_trait]
+impl Store for SftpStore {
+    async fn plant(&self, seed: &str) {
+        let f = self.session.create("upload/mystery").await.unwrap();
+    }
+}
+
 /******************************************************************************************************************************************
  ***************************************************** INSTRUCTION & RECIPE ************************************************************
 ******************************************************************************************************************************************/
@@ -378,7 +421,7 @@ struct FileSeeder {
 }
 
 impl FileSeeder {
-    fn new(url: url::Url) -> Self {
+    async fn new(url: url::Url) -> Self {
         match url.scheme() {
             "file" => Self {
                 name: String::from("file"),
@@ -403,6 +446,14 @@ impl FileSeeder {
                 Self {
                     store,
                     name: String::from("ftp"),
+                }
+            }
+            "sftp" => {
+                let store = Box::new(SftpStore::new().await);
+
+                Self {
+                    store,
+                    name: String::from("sftp"),
                 }
             }
             _ => unreachable!("unknown store"),
@@ -456,7 +507,7 @@ impl FromStr for StoreKind {
     fn from_str(store_name: &str) -> Result<Self, Self::Err> {
         let store = match store_name {
             "sqs" | "kafka" => Self::Msg,
-            "s3" | "ftp" | "file" => Self::File,
+            "s3" | "sftp" | "ftp" | "file" => Self::File,
             "ms" | "postgres" => Self::Database,
             "duckdb" => Self::DuckDB,
             _ => panic!("unknown store: received store {store_name}"),
@@ -486,7 +537,7 @@ impl StoreRegistry for &str {
         // implement Into<Box> for every seeder. This will only result in
         // a code asthetic improvement
         let seeder: Box<dyn Seeder> = match store_kind {
-            File => FileSeeder::new(url).into(),
+            File => FileSeeder::new(url).await.into(),
             Msg => MsgSeeder::new(url).await.into(),
             Database => DatabaseSeeder::new(url).await.into(),
             DuckDB => {
@@ -865,8 +916,52 @@ mod tests {
             let payload = actual_msg.payload().unwrap();
             let actual_msg = std::str::from_utf8(payload).unwrap();
             assert_eq!(actual_msg, "crabgrass");
-            break
+            break;
         }
     }
 
+    #[tokio::test]
+    async fn test_sftp_server() {
+        struct Client;
+
+        impl client::Handler for Client {
+            type Error = eyre::Report;
+
+            async fn check_server_key(
+                &mut self,
+                server_public_key: &russh::keys::PublicKey,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+
+        let config = russh::client::Config::default();
+        let sh = Client {};
+        let mut session =
+            russh::client::connect(std::sync::Arc::new(config), ("localhost", 22), sh)
+                .await
+                .unwrap();
+
+        session.authenticate_password("foo", "pass").await.unwrap();
+
+        let channel = session.channel_open_session().await.unwrap();
+        channel.request_subsystem(true, "sftp").await.unwrap();
+        let sftp = SftpSession::new(channel.into_stream()).await.unwrap();
+
+        if sftp.try_exists("upload/mystery").await.unwrap() {
+            let _ = sftp.remove_file("upload/mystery").await.unwrap();
+        }
+
+        let plower = Plower::new("sftp://localhost").await;
+        plower.seed("sftp").await;
+        let actual_filename = sftp
+            .read_dir("upload")
+            .await
+            .unwrap()
+            .next()
+            .unwrap()
+            .file_name();
+
+        assert_eq!(actual_filename, "mystery");
+    }
 }

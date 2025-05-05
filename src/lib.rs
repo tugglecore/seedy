@@ -334,24 +334,10 @@ impl From<DatabaseSeeder> for Box<dyn Seeder> {
 }
 
 impl DatabaseSeeder {
-    async fn new(url: url::Url) -> Self {
-        match url.scheme() {
-            "ms" => Self {
-                store_name: String::from("ms"),
-                store: Box::new(SqlServerStore::new(url).await),
-            },
-            "postgres" => {
-                let store = SpamStore::new(url).await;
-                Self {
-                    store_name: String::from("postgres"),
-                    store: Box::new(store),
-                }
-            }
-            "duckdb" => {
-                let connection = duckdb::Connection::open_in_memory().unwrap();
-                DatabaseSeeder::for_duckdb(connection).into()
-            }
-            _ => unreachable!("unknown store"),
+    async fn new(store: Box<dyn Store>, store_name: String) -> Self {
+        Self {
+            store,
+            store_name
         }
     }
 
@@ -381,23 +367,10 @@ struct MsgSeeder {
 }
 
 impl MsgSeeder {
-    async fn new(url: url::Url) -> Self {
-        match url.scheme() {
-            "sqs" => {
-                let store = SqsStore::new().await;
-                Self {
-                    store_name: String::from("sqs"),
-                    store: Box::new(store),
-                }
-            }
-            "kafka" => {
-                let store = KafkaStore::new().await;
-                Self {
-                    store_name: String::from("kafka"),
-                    store: Box::new(store),
-                }
-            }
-            _ => unreachable!("unknown store"),
+    async fn new(store: Box<dyn Store>, store_name: String) -> Self {
+        Self {
+            store,
+            store_name
         }
     }
 }
@@ -425,42 +398,10 @@ struct FileSeeder {
 }
 
 impl FileSeeder {
-    async fn new(url: url::Url) -> Self {
-        match url.scheme() {
-            "file" => Self {
-                name: String::from("file"),
-                store: Box::new(LocalFileSystem::new_with_prefix(url.path()).unwrap()),
-            },
-            "s3" => {
-                let store = object_store::aws::AmazonS3Builder::from_env()
-                    .with_bucket_name("farm")
-                    .with_access_key_id("test")
-                    .with_secret_access_key("test")
-                    .with_endpoint("http://localhost:4566")
-                    .with_allow_http(true)
-                    .build()
-                    .unwrap();
-                Self {
-                    name: String::from("S3"),
-                    store: Box::new(store),
-                }
-            }
-            "ftp" => {
-                let store = Box::new(FtpStore::new());
-                Self {
-                    store,
-                    name: String::from("ftp"),
-                }
-            }
-            "sftp" => {
-                let store = Box::new(SftpStore::new().await);
-
-                Self {
-                    store,
-                    name: String::from("sftp"),
-                }
-            }
-            _ => unreachable!("unknown store"),
+    async fn new(store: Box<dyn Store>, name: String) -> Self {
+        Self {
+            name,
+            store
         }
     }
 
@@ -495,27 +436,67 @@ impl From<FileSeeder> for Box<dyn Seeder> {
  *************************************************** STORE KIND & REGISTRY ***************************************************************
 ******************************************************************************************************************************************/
 
-#[derive(Debug)]
+// #[derive(Debug)]
 enum StoreKind {
-    Msg,
-    File,
-    Database,
+    Msg(Box<dyn Store>, String),
+    File(Box<dyn Store>, String),
+    Database(Box<dyn Store>, String),
 }
 
-impl FromStr for StoreKind {
-    // FIXME: This is using duckdb result as the default
-    // error type for all StoreKind conversions.
-    type Err = Result<StoreKind>;
+impl StoreKind {
 
-    fn from_str(store_name: &str) -> Result<Self, Self::Err> {
-        let store = match store_name {
-            "sqs" | "kafka" => Self::Msg,
-            "s3" | "sftp" | "ftp" | "file" => Self::File,
-            "duckdb" | "ms" | "postgres" => Self::Database,
+    async fn new(url: url::Url) -> Self {
+        let store_name = url.scheme();
+
+        match store_name {
+            "sqs" => {
+                let store = SqsStore::new().await;
+                Self::Msg(Box::new(store), String::from("sqs"))
+            }
+            "kafka" => {
+                let store = KafkaStore::new().await;
+                Self::Msg(Box::new(store), String::from("kafka"))
+            }
+            "file" => {
+                let store = Box::new(LocalFileSystem::new_with_prefix(url.path()).unwrap());
+                Self::File(store, String::from("file"))
+            },
+            "s3" => {
+                let store = object_store::aws::AmazonS3Builder::from_env()
+                    .with_bucket_name("farm")
+                    .with_access_key_id("test")
+                    .with_secret_access_key("test")
+                    .with_endpoint("http://localhost:4566")
+                    .with_allow_http(true)
+                    .build()
+                    .unwrap();
+                
+                    Self::File(Box::new(store), String::from("S3"))
+            }
+            "ftp" => {
+                let store = Box::new(FtpStore::new());
+                Self::File(store, String::from("ftp"))
+            }
+            "sftp" => {
+                let store = Box::new(SftpStore::new().await);
+
+                Self::File(store, String::from("sftp"))
+            }
+            "ms" => {
+                let store = Box::new(SqlServerStore::new(url).await);
+                Self::Database(store, String::from("ms"))
+            },
+            "postgres" => {
+                let store = SpamStore::new(url).await;
+                Self::Database(Box::new(store), String::from("postgres"))
+            }
+            "duckdb" => {
+                let connection = duckdb::Connection::open_in_memory().unwrap();
+                let store = Box::new(DuckStore::from_connection(connection));
+                Self::Database(store, String::from("duckdb"))
+            }
             _ => panic!("unknown store: received store {store_name}"),
-        };
-
-        Ok(store)
+        }
     }
 }
 
@@ -533,15 +514,15 @@ impl StoreRegistry for &str {
 
         let url = url::Url::parse(self).unwrap();
 
-        let store_kind = StoreKind::from_str(url.scheme()).unwrap();
+        let store_kind = StoreKind::new(url).await;
 
         // TODO: remove boxing from each branch. Potential solution is to
         // implement Into<Box> for every seeder. This will only result in
         // a code asthetic improvement
         let seeder: Box<dyn Seeder> = match store_kind {
-            File => FileSeeder::new(url).await.into(),
-            Msg => MsgSeeder::new(url).await.into(),
-            Database => DatabaseSeeder::new(url).await.into(),
+            File(store, name) => FileSeeder::new(store, name).await.into(),
+            Msg(store, name) => MsgSeeder::new(store, name).await.into(),
+            Database(store, name) => DatabaseSeeder::new(store, name).await.into(),
         };
 
         seeders.push(seeder);

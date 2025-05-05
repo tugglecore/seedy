@@ -347,6 +347,10 @@ impl DatabaseSeeder {
                     store: Box::new(store),
                 }
             }
+            "duckdb" => {
+                let connection = duckdb::Connection::open_in_memory().unwrap();
+                DatabaseSeeder::for_duckdb(connection).into()
+            }
             _ => unreachable!("unknown store"),
         }
     }
@@ -495,7 +499,6 @@ impl From<FileSeeder> for Box<dyn Seeder> {
 enum StoreKind {
     Msg,
     File,
-    DuckDB,
     Database,
 }
 
@@ -508,8 +511,7 @@ impl FromStr for StoreKind {
         let store = match store_name {
             "sqs" | "kafka" => Self::Msg,
             "s3" | "sftp" | "ftp" | "file" => Self::File,
-            "ms" | "postgres" => Self::Database,
-            "duckdb" => Self::DuckDB,
+            "duckdb" | "ms" | "postgres" => Self::Database,
             _ => panic!("unknown store: received store {store_name}"),
         };
 
@@ -540,10 +542,6 @@ impl StoreRegistry for &str {
             File => FileSeeder::new(url).await.into(),
             Msg => MsgSeeder::new(url).await.into(),
             Database => DatabaseSeeder::new(url).await.into(),
-            DuckDB => {
-                let connection = duckdb::Connection::open_in_memory().unwrap();
-                DatabaseSeeder::for_duckdb(connection).into()
-            }
         };
 
         seeders.push(seeder);

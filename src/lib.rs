@@ -4,6 +4,9 @@ use duckdb::Result;
 use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
 use parquet::arrow::async_writer::AsyncArrowWriter;
+use rdkafka::client::DefaultClientContext;
+use rdkafka::config::ClientConfig;
+use rdkafka::producer::{FutureProducer, FutureRecord};
 use sqlx::AnyConnection;
 use sqlx::any::install_default_drivers;
 use sqlx::prelude::*;
@@ -15,9 +18,8 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
-use rdkafka::config::ClientConfig;
-use rdkafka::client::DefaultClientContext;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use russh::*;
+use russh_sftp::{client::SftpSession};
 
 /*
  *
@@ -186,7 +188,7 @@ impl Store for SpamStore {
 }
 
 struct SqsStore {
-    client: aws_sdk_sqs::Client
+    client: aws_sdk_sqs::Client,
 }
 impl SqsStore {
     async fn new() -> Self {
@@ -201,7 +203,8 @@ impl SqsStore {
 #[async_trait]
 impl Store for SqsStore {
     async fn plant(&self, seed: &str) {
-        let queue_url = self.client
+        let queue_url = self
+            .client
             .get_queue_url()
             .queue_name("crops")
             .send()
@@ -220,7 +223,7 @@ impl Store for SqsStore {
 }
 
 struct KafkaStore {
-    client: FutureProducer
+    client: FutureProducer,
 }
 
 impl KafkaStore {
@@ -238,14 +241,11 @@ impl KafkaStore {
 impl Store for KafkaStore {
     async fn plant(&self, seed: &str) {
         let payload = String::from("crabgrass");
-        let record: FutureRecord<String, String> = FutureRecord::to("garden")
-            .payload(&payload);
+        let record: FutureRecord<String, String> = FutureRecord::to("garden").payload(&payload);
 
-        let _ = self.client
-            .send(
-                record,
-                std::time::Duration::from_millis(4000)
-            )
+        let _ = self
+            .client
+            .send(record, std::time::Duration::from_millis(4000))
             .await
             .unwrap();
     }
@@ -330,7 +330,7 @@ impl Seeder for DatabaseSeeder {
 
 struct MsgSeeder {
     store_name: String,
-    store: Box<dyn Store>
+    store: Box<dyn Store>,
 }
 
 impl MsgSeeder {
@@ -561,8 +561,16 @@ impl Plower {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream::StreamExt;
     use libunftp::Server;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+    use rdkafka::config::FromClientConfig;
+    use rdkafka::consumer::Consumer;
+    use rdkafka::consumer::stream_consumer::StreamConsumer;
+    use rdkafka::message::Message;
+    use rdkafka::topic_partition_list::Offset;
+    use rdkafka::topic_partition_list::TopicPartitionList;
     use sqlx::Connection;
     use sqlx::Executor;
     use sqlx::postgres::PgConnection;
@@ -571,15 +579,6 @@ mod tests {
     use suppaftp::list;
     use tokio::time::timeout;
     use unftp_sbe_fs::ServerExt;
-    use rdkafka::admin::{
-        AdminClient,
-        AdminOptions,
-        NewTopic,
-        TopicReplication
-    };
-    use rdkafka::config::FromClientConfig;
-    use rdkafka::consumer::stream_consumer::StreamConsumer;
-    use rdkafka::consumer::Consumer;
 
     async fn spin_up_ftp_server() {
         let handle = tokio::spawn(async {
@@ -825,47 +824,49 @@ mod tests {
         let mut client_config = ClientConfig::new();
         client_config
             .set("bootstrap.servers", "localhost:9092")
-            .set("group.id", "what");
+            .set("group.id", "what")
+            .set("enable.partition.eof", "false")
+            .set("enable.auto.commit", "false");
 
-        // let admin_client = AdminClient::from_config(&client_config)
-        //     .unwrap();
-        //
-        // let _ = admin_client
-        //     .delete_topics(
-        //         &["garden"],
-        //         &AdminOptions::new()
-        //     )
-        //     .await
-        //     .unwrap();
-        //
-        // let _ = admin_client
-        //     .create_topics(
-        //         vec![
-        //             &NewTopic {
-        //                 name: "garden",
-        //                 num_partitions: 1,
-        //                 config: vec![],
-        //                 replication: TopicReplication::Fixed(1)
-        //             }
-        //         ],
-        //         &AdminOptions::new()
-        //     )
-        //     .await
-        //     .unwrap();
+        let admin_client = AdminClient::from_config(&client_config).unwrap();
+
+        let _ = admin_client
+            .delete_topics(&["garden"], &AdminOptions::new())
+            .await
+            .unwrap();
+
+        let _ = admin_client
+            .create_topics(
+                vec![&NewTopic {
+                    name: "garden",
+                    num_partitions: 1,
+                    config: vec![],
+                    replication: TopicReplication::Fixed(1),
+                }],
+                &AdminOptions::new(),
+            )
+            .await
+            .unwrap();
 
         let plower = Plower::new("kafka://localhost").await;
         plower.seed("kafka").await;
 
-        let stream_consumer = client_config
-            .create::<StreamConsumer>()
+        let stream_consumer = client_config.create::<StreamConsumer>().unwrap();
+
+        let mut tpl = TopicPartitionList::new();
+
+        tpl.add_partition_offset("garden", 0, Offset::Beginning)
             .unwrap();
 
-        stream_consumer
-            .subscribe(&["garden"])
-            .unwrap();
+        stream_consumer.assign(&tpl).unwrap();
 
-        let actual_msg = stream_consumer.recv().await.unwrap();
-
-        println!("{actual_msg:#?}");
+        while let Some(msg) = stream_consumer.stream().next().await {
+            let Ok(actual_msg) = msg else { continue };
+            let payload = actual_msg.payload().unwrap();
+            let actual_msg = std::str::from_utf8(payload).unwrap();
+            assert_eq!(actual_msg, "crabgrass");
+            break
+        }
     }
+
 }

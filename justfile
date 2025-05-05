@@ -24,6 +24,10 @@ setup-env:
         --name broker \
         apache/kafka
 
+    podman run -d --name sftp \
+        -p 22:22 \
+        atmoz/sftp foo:pass:::test
+
 teardown:
     sudo docker rm -f $(docker ps -aq)
     podman rm --force --all

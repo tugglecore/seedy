@@ -1,9 +1,12 @@
 use arrow_array::record_batch;
 use async_trait::async_trait;
-use duckdb::{Result};
+use duckdb::Result;
 use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
 use parquet::arrow::async_writer::AsyncArrowWriter;
+use sqlx::AnyConnection;
+use sqlx::any::install_default_drivers;
+use sqlx::prelude::*;
 use std::io::Write;
 use std::str::FromStr;
 use suppaftp::FtpStream;
@@ -12,9 +15,9 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
-use sqlx::any::install_default_drivers;
-use sqlx::AnyConnection;
-use sqlx::prelude::*;
+use rdkafka::config::ClientConfig;
+use rdkafka::client::DefaultClientContext;
+use rdkafka::producer::{FutureProducer, FutureRecord};
 
 /*
  *
@@ -152,18 +155,18 @@ impl Store for FtpStore {
 }
 
 struct SpamStore {
-    connection: Mutex<AnyConnection>
+    connection: Mutex<AnyConnection>,
 }
 
 impl SpamStore {
     async fn new(url: url::Url) -> Self {
         install_default_drivers();
 
-        let mut connection = AnyConnection::connect("postgres://postgres:mysecretpassword@localhost/postgres")
-            .await
-            .unwrap()
-            .into();
-
+        let mut connection =
+            AnyConnection::connect("postgres://postgres:mysecretpassword@localhost/postgres")
+                .await
+                .unwrap()
+                .into();
 
         Self { connection }
     }
@@ -171,14 +174,78 @@ impl SpamStore {
 
 #[async_trait]
 impl Store for SpamStore {
-
     async fn plant(&self, seed: &str) {
-    use sqlx::Connection;
-        let mut connection = self.connection
-            .lock()
-            .await;
+        use sqlx::Connection;
+        let mut connection = self.connection.lock().await;
 
-        let _ = connection.execute("INSERT INTO show VALUES ('tmnt')")
+        let _ = connection
+            .execute("INSERT INTO show VALUES ('tmnt')")
+            .await
+            .unwrap();
+    }
+}
+
+struct SqsStore {
+    client: aws_sdk_sqs::Client
+}
+impl SqsStore {
+    async fn new() -> Self {
+        let config = aws_config::from_env()
+            .endpoint_url("http://localhost:4566")
+            .load()
+            .await;
+        let client = aws_sdk_sqs::Client::new(&config);
+        Self { client }
+    }
+}
+#[async_trait]
+impl Store for SqsStore {
+    async fn plant(&self, seed: &str) {
+        let queue_url = self.client
+            .get_queue_url()
+            .queue_name("crops")
+            .send()
+            .await
+            .unwrap()
+            .queue_url
+            .unwrap();
+
+        self.client
+            .send_message()
+            .queue_url(queue_url)
+            .message_body("fertilizer")
+            .send()
+            .await;
+    }
+}
+
+struct KafkaStore {
+    client: FutureProducer
+}
+
+impl KafkaStore {
+    async fn new() -> Self {
+        let client: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", "localhost:9092")
+            .create()
+            .unwrap();
+
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl Store for KafkaStore {
+    async fn plant(&self, seed: &str) {
+        let payload = String::from("crabgrass");
+        let record: FutureRecord<String, String> = FutureRecord::to("garden")
+            .payload(&payload);
+
+        let _ = self.client
+            .send(
+                record,
+                std::time::Duration::from_millis(4000)
+            )
             .await
             .unwrap();
     }
@@ -261,89 +328,46 @@ impl Seeder for DatabaseSeeder {
     }
 }
 
-struct SQSSeeder {
-    store: aws_sdk_sqs::Client,
+struct MsgSeeder {
+    store_name: String,
+    store: Box<dyn Store>
 }
 
-impl SQSSeeder {
+impl MsgSeeder {
     async fn new(url: url::Url) -> Self {
-        let config = aws_config::from_env()
-            .endpoint_url("http://localhost:4566")
-            .load()
-            .await;
-        let store = aws_sdk_sqs::Client::new(&config);
-        Self { store }
-    }
-}
-
-#[async_trait]
-impl Seeder for SQSSeeder {
-    fn store_name(&self) -> String {
-        String::from("sqs")
-    }
-
-    async fn seed(&self, instruction: Instruction) {
-        let queue_url = self
-            .store
-            .get_queue_url()
-            .queue_name("crops")
-            .send()
-            .await
-            .unwrap()
-            .queue_url
-            .unwrap();
-
-        self.store
-            .send_message()
-            .queue_url(queue_url)
-            .message_body("fertilizer")
-            .send()
-            .await;
-    }
-}
-
-impl From<SQSSeeder> for Box<dyn Seeder> {
-    fn from(value: SQSSeeder) -> Self {
-        Box::new(value)
-    }
-}
-
-struct ObjectSeeder {
-    store: Box<dyn ObjectStore>,
-}
-
-impl ObjectSeeder {
-    async fn new(url: url::Url) -> Self {
-        let store = object_store::aws::AmazonS3Builder::from_env()
-            .with_bucket_name("farm")
-            .with_access_key_id("test")
-            .with_secret_access_key("test")
-            .with_endpoint("http://localhost:4566")
-            .with_allow_http(true)
-            .build()
-            .unwrap();
-
-        Self {
-            store: Box::new(store),
+        match url.scheme() {
+            "sqs" => {
+                let store = SqsStore::new().await;
+                Self {
+                    store_name: String::from("sqs"),
+                    store: Box::new(store),
+                }
+            }
+            "kafka" => {
+                let store = KafkaStore::new().await;
+                Self {
+                    store_name: String::from("kafka"),
+                    store: Box::new(store),
+                }
+            }
+            _ => unreachable!("unknown store"),
         }
     }
 }
 
 #[async_trait]
-impl Seeder for ObjectSeeder {
+impl Seeder for MsgSeeder {
     fn store_name(&self) -> String {
-        String::from("S3")
+        self.store_name.clone()
     }
-    async fn seed(&self, instruction: Instruction) {
-        let path = object_store::path::Path::from("/sunflower");
-        let payload = object_store::PutPayload::from_static(b"hey!");
 
-        let put_result = self.store.put(&path, payload).await.unwrap();
+    async fn seed(&self, instruction: Instruction) {
+        self.store.plant("fs").await
     }
 }
 
-impl From<ObjectSeeder> for Box<dyn Seeder> {
-    fn from(value: ObjectSeeder) -> Self {
+impl From<MsgSeeder> for Box<dyn Seeder> {
+    fn from(value: MsgSeeder) -> Self {
         Box::new(value)
     }
 }
@@ -412,15 +436,13 @@ impl From<FileSeeder> for Box<dyn Seeder> {
     }
 }
 
-// struct FtpSeeder {
-//     client
 /******************************************************************************************************************************************
  *************************************************** STORE KIND & REGISTRY ***************************************************************
 ******************************************************************************************************************************************/
 
 #[derive(Debug)]
 enum StoreKind {
-    sqs,
+    Msg,
     File,
     DuckDB,
     Database,
@@ -433,7 +455,7 @@ impl FromStr for StoreKind {
 
     fn from_str(store_name: &str) -> Result<Self, Self::Err> {
         let store = match store_name {
-            "sqs" => Self::sqs,
+            "sqs" | "kafka" => Self::Msg,
             "s3" | "ftp" | "file" => Self::File,
             "ms" | "postgres" => Self::Database,
             "duckdb" => Self::DuckDB,
@@ -465,7 +487,7 @@ impl StoreRegistry for &str {
         // a code asthetic improvement
         let seeder: Box<dyn Seeder> = match store_kind {
             File => FileSeeder::new(url).into(),
-            sqs => SQSSeeder::new(url).await.into(),
+            Msg => MsgSeeder::new(url).await.into(),
             Database => DatabaseSeeder::new(url).await.into(),
             DuckDB => {
                 let connection = duckdb::Connection::open_in_memory().unwrap();
@@ -541,14 +563,23 @@ mod tests {
     use super::*;
     use libunftp::Server;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use sqlx::Connection;
+    use sqlx::Executor;
+    use sqlx::postgres::PgConnection;
     use std::time::Duration;
     use suppaftp::AsyncFtpStream;
     use suppaftp::list;
     use tokio::time::timeout;
     use unftp_sbe_fs::ServerExt;
-    use sqlx::Connection;
-    use sqlx::Executor;
-    use sqlx::postgres::PgConnection;
+    use rdkafka::admin::{
+        AdminClient,
+        AdminOptions,
+        NewTopic,
+        TopicReplication
+    };
+    use rdkafka::config::FromClientConfig;
+    use rdkafka::consumer::stream_consumer::StreamConsumer;
+    use rdkafka::consumer::Consumer;
 
     async fn spin_up_ftp_server() {
         let handle = tokio::spawn(async {
@@ -763,15 +794,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_seeding_postgres() {
-        let mut connection = PgConnection::connect("postgres://postgres:mysecretpassword@localhost/postgres")
-            .await
-            .unwrap();
+        let mut connection =
+            PgConnection::connect("postgres://postgres:mysecretpassword@localhost/postgres")
+                .await
+                .unwrap();
 
-        let _ = connection.execute(
-            "
+        let _ = connection
+            .execute(
+                "
             DROP TABLE IF EXISTS show;
             CREATE TABlE show (name text);
-        ")
+        ",
+            )
             .await
             .unwrap();
 
@@ -784,5 +818,54 @@ mod tests {
             .unwrap();
 
         assert_eq!(actual_value.0, "tmnt");
+    }
+
+    #[tokio::test]
+    async fn test_seeding_kafka() {
+        let mut client_config = ClientConfig::new();
+        client_config
+            .set("bootstrap.servers", "localhost:9092")
+            .set("group.id", "what");
+
+        // let admin_client = AdminClient::from_config(&client_config)
+        //     .unwrap();
+        //
+        // let _ = admin_client
+        //     .delete_topics(
+        //         &["garden"],
+        //         &AdminOptions::new()
+        //     )
+        //     .await
+        //     .unwrap();
+        //
+        // let _ = admin_client
+        //     .create_topics(
+        //         vec![
+        //             &NewTopic {
+        //                 name: "garden",
+        //                 num_partitions: 1,
+        //                 config: vec![],
+        //                 replication: TopicReplication::Fixed(1)
+        //             }
+        //         ],
+        //         &AdminOptions::new()
+        //     )
+        //     .await
+        //     .unwrap();
+
+        let plower = Plower::new("kafka://localhost").await;
+        plower.seed("kafka").await;
+
+        let stream_consumer = client_config
+            .create::<StreamConsumer>()
+            .unwrap();
+
+        stream_consumer
+            .subscribe(&["garden"])
+            .unwrap();
+
+        let actual_msg = stream_consumer.recv().await.unwrap();
+
+        println!("{actual_msg:#?}");
     }
 }

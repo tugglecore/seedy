@@ -19,6 +19,11 @@ setup-env:
         -p 5432:5432 \
         postgres
 
+    podman run -d --rm \
+        -p 9092:9092 \
+        --name broker \
+        apache/kafka
+
 teardown:
     sudo docker rm -f $(docker ps -aq)
     podman rm --force --all

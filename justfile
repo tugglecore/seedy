@@ -28,6 +28,11 @@ setup-env:
         -p 22:22 \
         atmoz/sftp foo:pass:::test
 
+    podman run -d --rm \
+        -p 6379:6379 \
+        --name some-redis \
+        redis
+
 teardown:
     sudo docker rm -f $(docker ps -aq)
     podman rm --force --all

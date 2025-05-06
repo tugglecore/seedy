@@ -7,6 +7,8 @@ use parquet::arrow::async_writer::AsyncArrowWriter;
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use redis::AsyncCommands;
+use redis::aio::MultiplexedConnection;
 use russh::*;
 use russh_sftp::client::SftpSession;
 use sqlx::AnyConnection;
@@ -294,6 +296,35 @@ impl Store for SftpStore {
     }
 }
 
+struct RedisStore {
+    connection: Mutex<MultiplexedConnection>,
+}
+
+impl RedisStore {
+    async fn new() -> Self {
+        let client = redis::Client::open("redis://127.0.0.1/").unwrap();
+        let connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap()
+            .into();
+
+        Self { connection }
+    }
+}
+
+#[async_trait]
+impl Store for RedisStore {
+    async fn plant(&self, seed: &str) {
+        self.connection
+            .lock()
+            .await
+            .set::<_, _, String>("lawn", "turf")
+            .await
+            .unwrap();
+    }
+}
+
 /******************************************************************************************************************************************
  ***************************************************** INSTRUCTION & RECIPE ************************************************************
 ******************************************************************************************************************************************/
@@ -335,10 +366,7 @@ impl From<DatabaseSeeder> for Box<dyn Seeder> {
 
 impl DatabaseSeeder {
     async fn new(store: Box<dyn Store>, store_name: String) -> Self {
-        Self {
-            store,
-            store_name
-        }
+        Self { store, store_name }
     }
 
     fn for_duckdb(connection: duckdb::Connection) -> Self {
@@ -368,10 +396,7 @@ struct MsgSeeder {
 
 impl MsgSeeder {
     async fn new(store: Box<dyn Store>, store_name: String) -> Self {
-        Self {
-            store,
-            store_name
-        }
+        Self { store, store_name }
     }
 }
 
@@ -399,10 +424,7 @@ struct FileSeeder {
 
 impl FileSeeder {
     async fn new(store: Box<dyn Store>, name: String) -> Self {
-        Self {
-            name,
-            store
-        }
+        Self { name, store }
     }
 
     async fn seed_parquet(&self, instruction: Instruction) {
@@ -444,7 +466,6 @@ enum StoreKind {
 }
 
 impl StoreKind {
-
     async fn new(url: url::Url) -> Self {
         let store_name = url.scheme();
 
@@ -460,7 +481,7 @@ impl StoreKind {
             "file" => {
                 let store = Box::new(LocalFileSystem::new_with_prefix(url.path()).unwrap());
                 Self::File(store, String::from("file"))
-            },
+            }
             "s3" => {
                 let store = object_store::aws::AmazonS3Builder::from_env()
                     .with_bucket_name("farm")
@@ -470,8 +491,8 @@ impl StoreKind {
                     .with_allow_http(true)
                     .build()
                     .unwrap();
-                
-                    Self::File(Box::new(store), String::from("S3"))
+
+                Self::File(Box::new(store), String::from("S3"))
             }
             "ftp" => {
                 let store = Box::new(FtpStore::new());
@@ -485,7 +506,7 @@ impl StoreKind {
             "ms" => {
                 let store = Box::new(SqlServerStore::new(url).await);
                 Self::Database(store, String::from("ms"))
-            },
+            }
             "postgres" => {
                 let store = SpamStore::new(url).await;
                 Self::Database(Box::new(store), String::from("postgres"))
@@ -494,6 +515,10 @@ impl StoreKind {
                 let connection = duckdb::Connection::open_in_memory().unwrap();
                 let store = Box::new(DuckStore::from_connection(connection));
                 Self::Database(store, String::from("duckdb"))
+            }
+            "redis" => {
+                let store = RedisStore::new().await;
+                Self::Database(Box::new(store), String::from("redis"))
             }
             _ => panic!("unknown store: received store {store_name}"),
         }
@@ -933,6 +958,7 @@ mod tests {
 
         let plower = Plower::new("sftp://localhost").await;
         plower.seed("sftp").await;
+
         let actual_filename = sftp
             .read_dir("upload")
             .await
@@ -942,5 +968,22 @@ mod tests {
             .file_name();
 
         assert_eq!(actual_filename, "mystery");
+    }
+
+    #[tokio::test]
+    async fn test_seeding_redis() {
+        let client = redis::Client::open("redis://127.0.0.1/").unwrap();
+        let mut connection = client.get_multiplexed_async_connection().await.unwrap();
+
+        if connection.exists::<_, bool>("lawn").await.unwrap() {
+            connection.del::<_, String>("lawn").await.unwrap();
+        }
+
+        let plower = Plower::new("redis://localhost").await;
+        plower.seed("redis").await;
+
+        let value = connection.get::<_, String>("lawn").await.unwrap();
+
+        assert_eq!(value, String::from("turf"));
     }
 }

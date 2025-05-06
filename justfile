@@ -33,6 +33,11 @@ setup-env:
         --name some-redis \
         redis
 
+    podman run -d --rm \
+        -p 27017:27017
+        --name some-mongo
+        mongo
+
 teardown:
     sudo docker rm -f $(docker ps -aq)
     podman rm --force --all

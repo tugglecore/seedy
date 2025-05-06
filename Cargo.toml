@@ -17,6 +17,7 @@ eyre = "0.6.12"
 futures = "0.3.31"
 libunftp = "0.20.3"
 log = "0.4.27"
+mongodb = "3.2.3"
 object_store = { version = "0.12.0", features = ["aws"] }
 parquet = { version = "55.0.0", features = ["arrow", "async"] }
 rdkafka = "0.37.0"

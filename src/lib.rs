@@ -1,6 +1,10 @@
 use arrow_array::record_batch;
 use async_trait::async_trait;
 use duckdb::Result;
+use mongodb::{
+    Collection,
+    bson::{Document, doc},
+};
 use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
 use parquet::arrow::async_writer::AsyncArrowWriter;
@@ -325,6 +329,33 @@ impl Store for RedisStore {
     }
 }
 
+struct MongoStore {
+    client: mongodb::Client,
+}
+
+impl MongoStore {
+    async fn new() -> Self {
+        let client = mongodb::Client::with_uri_str("mongodb://127.0.0.1/")
+            .await
+            .unwrap();
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl Store for MongoStore {
+    async fn plant(&self, seed: &str) {
+        let doc = doc! { "brand": "LG" };
+        let r = self
+            .client
+            .database("electronics")
+            .collection::<Document>("tv")
+            .insert_one(&doc)
+            .await
+            .unwrap();
+    }
+}
+
 /******************************************************************************************************************************************
  ***************************************************** INSTRUCTION & RECIPE ************************************************************
 ******************************************************************************************************************************************/
@@ -520,6 +551,10 @@ impl StoreKind {
                 let store = RedisStore::new().await;
                 Self::Database(Box::new(store), String::from("redis"))
             }
+            "mongodb" => {
+                let store = MongoStore::new().await;
+                Self::Database(Box::new(store), String::from("mongodb"))
+            }
             _ => panic!("unknown store: received store {store_name}"),
         }
     }
@@ -618,6 +653,10 @@ mod tests {
     use super::*;
     use futures::stream::StreamExt;
     use libunftp::Server;
+    use mongodb::{
+        Collection,
+        bson::{Document, doc},
+    };
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
     use rdkafka::config::FromClientConfig;
@@ -985,5 +1024,29 @@ mod tests {
         let value = connection.get::<_, String>("lawn").await.unwrap();
 
         assert_eq!(value, String::from("turf"));
+    }
+
+    #[tokio::test]
+    async fn test_seeding_mongodb() {
+        let client = mongodb::Client::with_uri_str("mongodb://127.0.0.1/")
+            .await
+            .unwrap();
+
+        let database = client.database("electronics");
+        let collection: Collection<Document> = database.collection("tv");
+
+        let doc = doc! { "brand": "LG" };
+        let res = collection.delete_many(doc.clone()).await.unwrap();
+
+        let plower = Plower::new("mongodb://localhost").await;
+        plower.seed("mongodb").await;
+
+        let mut l = collection.find(doc).await.unwrap();
+
+        let document = l.next().await.unwrap().unwrap();
+
+        let actual_value = document.get_str("brand").unwrap().to_string();
+
+        assert_eq!(actual_value, String::from("LG"))
     }
 }

@@ -34,8 +34,8 @@ setup-env:
         redis
 
     podman run -d --rm \
-        -p 27017:27017
-        --name some-mongo
+        -p 27017:27017 \
+        --name some-mongo \
         mongo
 
 teardown:

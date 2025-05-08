@@ -1,3 +1,5 @@
+pub mod recipe;
+
 use arrow_array::record_batch;
 use async_trait::async_trait;
 use duckdb::Result;
@@ -26,12 +28,17 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
+use recipe::*;
 
 /*
  *
  * service_scope { target <modifiers> [literals or generators(args)] }
  *
  * file { course.parquet <format: parquet> [ { topic: Chemistry } ] }
+ *
+ * field_identifier <modifiers> { [literals or generators(args)] }
+ *
+ * field <modifiers>? plot <modifiers>? { count? * [literals or generators(args)] }
  *
  */
 
@@ -296,7 +303,7 @@ impl SftpStore {
 #[async_trait]
 impl Store for SftpStore {
     async fn plant(&self, seed: &str) {
-        let f = self.session.create("upload/mystery").await.unwrap();
+        let f = self.session.create("test/mystery").await.unwrap();
     }
 }
 
@@ -355,24 +362,6 @@ impl Store for MongoStore {
             .unwrap();
     }
 }
-
-/******************************************************************************************************************************************
- ***************************************************** INSTRUCTION & RECIPE ************************************************************
-******************************************************************************************************************************************/
-
-#[derive(Debug)]
-struct Instruction {
-    store_name: String,
-}
-
-pub fn prep_recipe(recipe: &str) -> Vec<Instruction> {
-    vec![Instruction {
-        store_name: String::from(recipe),
-    }]
-}
-
-trait Recipe {}
-impl Recipe for &str {}
 
 /******************************************************************************************************************************************
  ************************************************************* SEEDER ********************************************************************
@@ -991,15 +980,15 @@ mod tests {
         channel.request_subsystem(true, "sftp").await.unwrap();
         let sftp = SftpSession::new(channel.into_stream()).await.unwrap();
 
-        if sftp.try_exists("upload/mystery").await.unwrap() {
-            let _ = sftp.remove_file("upload/mystery").await.unwrap();
+        if sftp.try_exists("test/mystery").await.unwrap() {
+            let _ = sftp.remove_file("test/mystery").await.unwrap();
         }
 
         let plower = Plower::new("sftp://localhost").await;
         plower.seed("sftp").await;
 
         let actual_filename = sftp
-            .read_dir("upload")
+            .read_dir("test")
             .await
             .unwrap()
             .next()

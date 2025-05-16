@@ -1,6 +1,7 @@
 use std::str::FromStr;
 use winnow::ascii::{alpha1, digit0, space0};
 use winnow::combinator::{delimited, opt, repeat, separated, terminated};
+use winnow::error::ContextError;
 use winnow::prelude::*;
 use winnow::stream::Stream;
 use winnow::token::one_of;
@@ -36,21 +37,20 @@ pub struct Order {
     pub location: Vec<String>,
 }
 
-fn parse_record<'i>(input: &mut &'i str) -> Result<u32> {
-    // let w = (space0,
-    //     digit0.map(|s| u32::from_str(s).unwrap()),
-    //     space0
-    // ).parse_next(input);
+fn parse_stock_items<'i>(input: &mut &'i str) -> Result<(u32, &'i str)> {
+    let stock = delimited((space0, "{", space0), "i", (space0, "}", space0));
 
-    let w = space0
-        .map_err(|e| "s")
-        .parse_next(input);
-    println!("{w:#?}");
-    Ok(w.unwrap())
-}
+    let item_count = terminated(digit0, (space0, "*", space0)).map(|s| u32::from_str(s).unwrap());
 
-fn parse_stock_items<'i>(input: &mut &'i str) -> Result<u32> {
-    let t = delimited("[", parse_record, "]").parse_next(input);
+    let stock_item_parser = (item_count, stock);
+
+    let t = delimited(
+        (space0, "[", space0),
+        stock_item_parser,
+        (space0, "]", space0),
+    )
+    .parse_next(input);
+
     println!("{t:#?}");
     t
 }
@@ -62,9 +62,9 @@ fn parse_order_location<'i>(input: &mut &'i str) -> Result<Vec<String>> {
 }
 
 pub fn parse_recipe(mut recipe: &str) -> Vec<&str> {
-    let order_location = (parse_order_location, parse_stock_items)
-        .parse_next(&mut recipe)
-        .unwrap();
+    let order_location = (parse_order_location, parse_stock_items).parse_next(&mut recipe);
+    println!("{order_location:#?}");
+    let order_location = order_location.unwrap();
 
     // println!("{bin:#?}");
     // let bin = bin.unwrap();
@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn parse_simples() {
         // ftp/cars.parquet <format=parquet> [ 100 * { make: 'Honda', model: Name } ];
-        let value = parse_recipe("store.section.shelf [ 100 ]");
+        let value = parse_recipe("store.section.shelf [ 100 *  {i} ]");
         assert!(false)
         // assert_eq!(value, String::from("store.section"));
     }

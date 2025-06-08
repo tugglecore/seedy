@@ -13,7 +13,6 @@ use parquet::arrow::async_writer::AsyncArrowWriter;
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use recipe::*;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 use russh::*;
@@ -29,9 +28,9 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
+use recipe::*;
 
 /*
- *
  * service_scope { target <modifiers> [literals or generators(args)] }
  *
  * file { course.parquet <format: parquet> [ { topic: Chemistry } ] }
@@ -598,6 +597,10 @@ impl StoreRegistry for String {
  *********************************************************** PLOWER ************************************************************************
 ******************************************************************************************************************************************/
 
+pub async fn gather_stock_materials(seeder: &Box<dyn Seeder>, stock_order: Order) -> Vec<Order> {
+    vec![]
+}
+
 struct Plower {
     seeders: Vec<Box<dyn Seeder>>,
 }
@@ -610,19 +613,22 @@ impl Plower {
         Self { seeders }
     }
 
-    pub async fn seed(&self, recipe: &str) {
-        let instructions = prep_recipe(recipe);
+    pub async fn seed(&self, stock_request: &str) {
+        let stock_orders = prep_recipe(stock_request);
 
         let seeder_count = self.seeders.len();
         let seeder_name = self.seeders.first().unwrap().store_name();
-        for instruction in instructions {
+
+        for stock_order in stock_orders {
             let seeder = self
                 .seeders
                 .iter()
-                .find(|seeder| seeder.store_name() == instruction.store_name)
+                .find(|seeder| seeder.store_name() == stock_order.store_name)
                 .unwrap();
 
-            seeder.seed(instruction).await;
+            // let stock_orders = gather_stock_materials(seeder, stock_order).await;
+
+            seeder.seed(stock_order).await;
         }
     }
 

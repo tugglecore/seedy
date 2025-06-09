@@ -13,6 +13,7 @@ use parquet::arrow::async_writer::AsyncArrowWriter;
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use recipe::*;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 use russh::*;
@@ -28,7 +29,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
-use recipe::*;
 
 /*
  * service_scope { target <modifiers> [literals or generators(args)] }

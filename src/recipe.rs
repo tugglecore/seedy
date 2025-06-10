@@ -1,8 +1,8 @@
 use crate::Seeder;
 use std::collections::HashMap;
 use std::str::FromStr;
-use winnow::ascii::{alpha1, digit0, space0};
-use winnow::combinator::{delimited, opt, repeat, separated, separated_pair, terminated};
+use winnow::ascii::{alpha1, digit0, digit1, space0};
+use winnow::combinator::{alt, delimited, opt, preceded, repeat, separated, separated_pair, terminated};
 use winnow::error::ContextError;
 use winnow::prelude::*;
 use winnow::stream::Stream;
@@ -62,11 +62,10 @@ pub struct Shipment {
     pub stock: Vec<Stock>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stock {
-    pub target: Vec<String>,
-    pub count: usize,
-    pub goods: HashMap<String, Vec<Item>>,
+    pub count: u32,
+    pub goods: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -76,14 +75,14 @@ pub struct Order {
     pub stock_kinds: Vec<Stock>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct StockOrder {
     pub destination: Vec<String>,
     pub modifiers: HashMap<String, String>,
     pub requested_stock: Vec<Stock>,
 }
 
-fn parse_stock_items<'i>(input: &mut &'i str) -> Result<(u32, HashMap<String, String>)> {
+fn parse_stock_items<'i>(input: &mut &'i str) -> Result<Stock> {
     let key_value = terminated(
         separated_pair(alpha1, (space0, ":", space0), alpha1),
         opt((space0, ",", space0)),
@@ -94,22 +93,24 @@ fn parse_stock_items<'i>(input: &mut &'i str) -> Result<(u32, HashMap<String, St
 
     let stock = delimited(
         (space0, "{", space0),
-        stock_key_values,
+         stock_key_values,
         (space0, "}", space0),
     );
 
-    let item_count = terminated(digit0, (space0, "*", space0)).map(|s| u32::from_str(s).unwrap());
+    let item_count = digit1.map(|s| u32::from_str(s).unwrap());
 
-    let stock_item_parser = (item_count, stock);
-
-    let t = delimited(
+    delimited(
         (space0, "[", space0),
-        stock_item_parser,
+        (item_count, opt(preceded((space0, "*", space0), stock))),
         (space0, "]", space0),
     )
-    .parse_next(input);
-
-    t
+    .map(|(count, goods)| {
+        Stock { 
+            count, 
+            goods: goods.unwrap_or_default()
+        }
+    })
+    .parse_next(input)
 }
 
 fn parse_store_modifier<'i>(input: &mut &'i str) -> Result<HashMap<String, String>> {
@@ -121,9 +122,7 @@ fn parse_store_modifier<'i>(input: &mut &'i str) -> Result<HashMap<String, Strin
 
     let changers = repeat::<_, _, HashMap<String, String>, _, _>(0.., store_modifiers);
 
-    let t = delimited((space0, "<", space0), changers, (space0, ">", space0)).parse_next(input);
-
-    t
+    delimited((space0, "<", space0), changers, (space0, ">", space0)).parse_next(input)
 }
 
 fn parse_order_location<'i>(input: &mut &'i str) -> Result<Vec<String>> {
@@ -132,17 +131,22 @@ fn parse_order_location<'i>(input: &mut &'i str) -> Result<Vec<String>> {
         .parse_next(input)
 }
 
-pub fn process_order(mut recipe: &str) -> Vec<&str> {
-    let (order_location, modifiers, stock) = (
+pub fn process_order(mut recipe: &str) -> Vec<StockOrder> {
+    let (destination, modifiers, stock) = (
         parse_order_location,
-        parse_store_modifier,
-        parse_stock_items,
+        opt(parse_store_modifier),
+        opt(parse_stock_items),
     )
         .parse_next(&mut recipe)
         .unwrap();
 
-    println!("{order_location:#?}");
-    vec![]
+    let stock_order = StockOrder {
+        destination,
+        modifiers: modifiers.unwrap_or_default(),
+        requested_stock: vec![stock.unwrap_or_default()],
+    };
+
+    vec![stock_order]
 }
 
 #[cfg(test)]
@@ -155,21 +159,19 @@ mod tests {
             StockOrder {
                 destination: vec![],
                 modifiers: HashMap::new(),
-                requested_stock: vec![]
+                requested_stock: vec![Stock::default()]
             }
         };
         ([$($store_parts:expr),*]) => {
             StockOrder {
-                destination:
-                    vec![$(String::from($store_parts)),*],
+                destination: vec![$(String::from($store_parts)),*],
                 modifiers: HashMap::new(),
-                requested_stock: vec![]
+                requested_stock: vec![Stock::default()]
             }
         };
         ([$($store_parts:expr),*], [$(($mod_key:expr,$mod_val:expr)),+]) => {
             StockOrder {
-                destination:
-                    vec![$(String::from($store_parts)),*],
+                destination: vec![$(String::from($store_parts)),*],
                 modifiers: HashMap::from(
                     [
                     $((
@@ -178,7 +180,7 @@ mod tests {
                     )),+
                     ]
                 ),
-                requested_stock: vec![]
+                requested_stock: vec![Stock::default()]
             }
         };
         (
@@ -186,15 +188,14 @@ mod tests {
             [$(($mod_key:expr,$mod_val:expr)),+],
             $count:expr
         ) => {
-            StockOr:der {
-                destination:
-                    vec![$(String::from($store_parts)),*],
+            StockOrder {
+                destination: vec![$(String::from($store_parts)),*],
                 modifiers: HashMap::from(
                     [
-                    $((
-                            String::from($mod_key),
-                            String::from($mod_val)
-                    )),+
+                        $((
+                                String::from($mod_key),
+                                String::from($mod_val)
+                        )),+
                     ]
                 ),
                 requested_stock: vec![
@@ -205,17 +206,76 @@ mod tests {
                 ]
             }
         };
+        (
+            [$($store_parts:expr),*],
+            [$(($mod_key:expr,$mod_val:expr)),+],
+            $count:expr,
+            [$(($col:expr,$val:expr)),+]
+        ) => {
+            StockOrder {
+                destination: vec![$(String::from($store_parts)),*],
+                modifiers: HashMap::from(
+                    [
+                        $((
+                                String::from($mod_key),
+                                String::from($mod_val)
+                        )),+
+                    ]
+                ),
+                requested_stock: vec![
+                    Stock {
+                        count: $count,
+                        goods: HashMap::from(
+                            [
+                                $((
+                                        String::from($col),
+                                        String::from($val)
+                                )),+
+                            ]
+                        )
+                    }
+                ]
+            }
+        };
     }
 
     #[test_case(
-        "store.section.shelf <a=b, c = d> [ 100 *  {i:j   ,d:e,  h :  i} ]", 
-        build_order!(["store", "section", "shelf"], [("a", "b"), ("c", "d")]); 
+        "a",
+        build_order!(["a"]);
+        "stock one identifier shelf"
+    )]
+    #[test_case(
+        "a <b=c>",
+        build_order!(["a"], [("b", "c")]);
+        "stock shelf with modifier"
+    )]
+    // Note: a <b=c> [ 3 * ] is an error b/c of the trailing asterisk
+    #[test_case(
+        "a <b=c> [ 3 ]",
+        build_order!(["a"], [("b", "c")], 3);
+        "stock shelf with specific count"
+    )]
+    #[test_case(
+        "a <b=c> [ 14 * { d: e } ]",
+        build_order!(
+            ["a"], [("b", "c")], 14,
+            [("d", "e")]
+        );
+        "stock shelf with requested stock"
+    )]
+    #[test_case(
+        "store.section.shelf <a=b, c = d> [ 100 * { i:j, d:e, h:i } ]", 
+        build_order!(
+            ["store", "section", "shelf"],
+            [("a", "b"), ("c", "d")],
+            100,
+            [("i", "j"), ("d", "e"), ("h", "i")]
+        );
         "kitchen sink example"
     )]
     fn parse_simples(stock_order: &str, expected_order: StockOrder) {
-        let value = process_order(stock_order);
-        println!("{expected_order:#?}");
-        assert!(false)
-        // assert_eq!(value, String::from("store.section"));
+        let subject_order = process_order(stock_order).pop().unwrap();
+
+        assert_eq!(subject_order, expected_order);
     }
 }

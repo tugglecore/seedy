@@ -62,6 +62,8 @@ pub struct Shipment {
     pub stock: Vec<Stock>,
 }
 
+// TODO: Need to create a Good struct to encapsulate
+// all the different values will can have as goods
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stock {
     pub count: u32,
@@ -143,6 +145,11 @@ pub fn process_order(mut recipe: &str) -> Vec<StockOrder> {
     let stock_order = StockOrder {
         destination,
         modifiers: modifiers.unwrap_or_default(),
+        // TODO: Add capability to parse various stocks
+        // for same order. This will result in a Vec being
+        // returned for our parser parse_stock_items and
+        // allow capabilities such as
+        // a [ {a: b}, 4 * { s: t } ]
         requested_stock: vec![stock.unwrap_or_default()],
     };
 

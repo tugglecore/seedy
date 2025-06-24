@@ -628,6 +628,10 @@ impl Plower {
 
             // let stock_orders = gather_stock_materials(seeder, stock_order).await;
 
+            // mold: discover_mold
+            // collect: collect_materials
+            // build: build_stock
+
             seeder.seed(stock_order).await;
         }
     }

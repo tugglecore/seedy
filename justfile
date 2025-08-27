@@ -1,4 +1,4 @@
-setup-env:
+setup:
     sudo docker run -d --rm -it \
     -p 127.0.0.1:4566:4566 \
     -p 127.0.0.1:4510-4559:4510-4559 \

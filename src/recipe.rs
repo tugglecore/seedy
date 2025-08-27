@@ -21,11 +21,100 @@ use winnow::{Parser, Result};
 // pg.enrollments [ 20 ]
 //
 // enroll 20 law students in a Math course with one named Bill:
+//
+// Attempt 1:
 // $law_student = pg.student [ 19 * { college: "Law" } ]
 // pg.course [ { course: "Math" } ]
 // pg.student [ { name: "Bill", college: "Law" } ]
 // pg.enrollment [ { course: "Math", name: "Bill" } ]
 // pg.enrollment [ 19 * { course: "Math", name: from_set($law_student) } ]
+//
+// Attempt 2:
+// pg.enrollment [
+//  19 * {
+//          course: "Math",
+//          name: ( pg.student [ 19 * { college: "Law" }, { name: "Bill", college: "Law" } ] )
+//      }
+//  ]
+//
+// Attempt 3:
+// INSERT INTO Enrollment COLUMNS (name, course)
+// VALUES (BILL, MATH), 20 * (_, Math)
+//
+// Attempt 4:
+// INSERT Enrollment COLUMNS ((college, name), course)
+// VALUES ((LAW, BILL), MATH), 20 * ((LAW, _), MATH)
+// 
+// Enrollment(Student)
+// Student(Enrollment)
+// (Enrollment(Student))
+// (Student(Enrollment))
+// Enrollment((Student), Course)
+//
+// INSERT Enrollment((Student), Course)
+// VALUES ((LAW, BILL), MATH), 20 * ((LAW, _), MATH)
+//
+// INSERT Enrollment(( Student(college, name) ), course)
+// VALUES ((Law, BILL), MATH), 20 * ((Law, _), MATH)
+// 
+// INSERT Enrollment(( Student(college, name) ), course)
+// VALUES [
+//      ((Law, BILL), MATH),
+//      20 * ((Law, _), MATH)
+// ]
+//
+// INSERT Enrollment{{ Student{college, name} }, course}
+// VALUES [
+//      ((Law, BILL), MATH),
+//      20 * ((Law, _), MATH)
+// ]
+//
+// INSERT Enrollment{Student{college, name}, course}
+// VALUES [
+//      ((Law, BILL), MATH),
+//      20 * ((Law, _), MATH)
+// ]
+//
+// INSERT { Enrollment: { course, name: { Student: { college, name } } } }
+// VALUES [
+//      { MATH, { LAW, BILL } },
+//      20 * { MATH, { LAW, _ } },
+//      10 * { MATH },
+//      4
+//  ]
+//
+//  INSERT { Tiprule: { ruletype, tipdetailid: { TipdetailRule: { publishTip } } } }
+//  VALUES [
+//      { Clinical, { True } },
+//      { Clinical },
+//      3
+//  ]
+//
+//  Goal:
+//  - 19 students
+//  - 19 enrollments
+//  - 1 college
+//  - 1 course
+//
+//  Academia [
+//      Student { college_title: "Law", name: "Bill" }
+//      Enrollment { course_title: "Math", name }
+//  ]
+//  Academia <count=18> [
+//      Student { college_title, name: @ },
+//      Enrollment { course_title, name: @ }
+//  ]
+//
+//
+//  INSERT INTO COLLEGE (college_title) VALUES ('Law');
+//  INSERT INTO Course (course_title) VALUES ('Math');
+//  INSERT INTO Student (college_title, name) VALUES ('Law', 'Bill')
+//  INSERT INTO Enrollment (course_title, name) VALUES('Math', 'Bi')
+//  INSERT INTO Student (college_title, name)
+//      VALUES ('Law', 'Bill'), ('Law', 'Sam'), ('Law', 'Tom')
+//  INSERT INTO Enrollment (course_title, name)
+//      VALUES ('Math', 'Bi'), ('Math', 'Sam'), ('Math', 'Tom')
+
 
 #[derive(Debug)]
 pub struct Seed;

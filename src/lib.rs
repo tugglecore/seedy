@@ -3,14 +3,10 @@ pub mod recipe;
 use arrow_array::record_batch;
 use async_trait::async_trait;
 use duckdb::Result;
-use mongodb::{
-    Collection,
-    bson::{Document, doc},
-};
+use mongodb::bson::{Document, doc};
 use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
 use parquet::arrow::async_writer::AsyncArrowWriter;
-use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use recipe::*;
@@ -22,7 +18,6 @@ use sqlx::AnyConnection;
 use sqlx::any::install_default_drivers;
 use sqlx::prelude::*;
 use std::io::Write;
-use std::str::FromStr;
 use suppaftp::FtpStream;
 use tiberius::{AuthMethod, Client, Config, Query};
 use tokio::net::TcpStream;
@@ -176,7 +171,7 @@ impl SpamStore {
     async fn new(url: url::Url) -> Self {
         install_default_drivers();
 
-        let mut connection =
+        let connection =
             AnyConnection::connect("postgres://postgres:mysecretpassword@localhost/postgres")
                 .await
                 .unwrap()
@@ -189,7 +184,7 @@ impl SpamStore {
 #[async_trait]
 impl Store for SpamStore {
     async fn plant(&self, seed: &str) {
-        use sqlx::Connection;
+        
         let mut connection = self.connection.lock().await;
 
         let _ = connection

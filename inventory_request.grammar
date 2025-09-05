@@ -1,0 +1,37 @@
+inventory = { SOI ~ stock_order+ ~ EOI }
+
+stock_order = { store ~ "[" ~ order+ ~ "]" }
+
+store = { ASCII_ALPHA+ }
+
+order = {
+	bin ~ "{" ~ stock+ ~ "}" 
+}
+
+stock = { 
+	attribute ~ ("," ~ attribute)* ~ ","?
+}
+
+bin = { ASCII_ALPHA+ }
+
+attribute = {
+	label ~ (
+    	label_assignment ~ alias ~ value_assignment ~ value
+    	| label_suppressor ~ value
+        | label_assignment ~ alias
+        | value_assignment ~ value
+    )?
+}
+
+label = { ASCII_ALPHA+ }
+
+label_suppressor = { ":=" }
+
+label_assignment = { ":" }
+
+value = { ASCII_DIGIT }
+value_assignment = { "=" }
+
+alias = { "@" ~ ASCII_ALPHA+ }
+
+WHITESPACE = _{ " " | NEWLINE }

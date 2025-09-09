@@ -1,13 +1,11 @@
 use crate::Seeder;
 use std::collections::HashMap;
-use std::str::FromStr;
-// use winnow::ascii::{alpha1, digit1, space0};
-// use winnow::combinator::{
-//     delimited, opt, preceded, repeat, separated, separated_pair, terminated,
-// };
-// use winnow::token::one_of;
-// use winnow::{Parser, Result};
-use chumsky::prelude::*;
+use winnow::ascii::{alpha1, digit1, multispace0, multispace1, space0};
+use winnow::combinator::{
+    alt, delimited, empty, opt, peek, preceded, repeat, separated, separated_pair, terminated,
+    trace,
+};
+use winnow::prelude::*;
 
 // url store.bin <modifiers> { count * [literals or generators(args)] }
 // s3:products:/policy_13/
@@ -17,8 +15,6 @@ use chumsky::prelude::*;
 // s3/products/policy_13/
 // s3.products.policy_13
 // mssql.outcomesidentification.tipresult_new
-//
-// pg.enrollments [ 20 ]
 //
 // enroll 20 law students in a Math course with one named Bill:
 //
@@ -96,104 +92,114 @@ pub enum DataStock {
     Values(String),
     Count(u64),
     Inventory(Vec<DataStock>),
+    Record(Vec<DataStock>),
     Order {
         store_name: String,
         store_kind: String,
         modifiers: Vec<DataStock>,
-        stock: Vec<DataStock>
+        stock: Vec<DataStock>,
     },
-    Stock  {
+    Stock {
         bin_name: String,
-        records: Vec<DataStock>
+        records: Vec<DataStock>,
     },
-    Record {
+    Attribute {
         key: String,
         value: Option<String>,
-        label: Option<String>
-    }
+        label: Option<String>,
+    },
 }
 
-fn parser<'src>() -> 
-    impl Parser<'src, &'src str, DataStock, extra::Err<Cheap>> {
-    let store = text::ascii::ident()
-        .padded();
+fn parse_record<'i>(input: &mut &'i str) -> winnow::Result<DataStock> {
+    let whitespace = |t| (multispace0, t, multispace0);
 
+    let attribute = separated_pair(
+        alpha1.map(String::from),
+        whitespace(":"),
+        alpha1.map(String::from),
+    )
+    .map(|(key, value)| DataStock::Attribute {
+        key,
+        value: Some(value),
+        label: None,
+    });
 
-    let stock = text::ascii::ident().padded();
-
-    store
-        .then(stock.delimited_by(
-        just("["),
-        just("]")
-        ))
-        .padded()
-        .map(|(store_name, bin_name)| {
-            DataStock::Order {
-                store_name: String::from(store_name),
-                store_kind: String::from("Database"),
-                modifiers: Vec::new(),
-                stock: vec![DataStock::Stock {
-                    bin_name:String::from(bin_name),
-                    records: Vec::new()
-                }]
-            }
-        })
+    delimited(
+        whitespace("{"),
+        separated(0.., attribute, ","),
+        (opt(whitespace(",")), whitespace("}")),
+    )
+    .map(DataStock::Record)
+    .parse_next(input)
 }
 
-// fn parser<'src>() -> impl Parser<'src, &'src str, DataStock> {
-//     let store = text::ascii::ident()
-//         .padded()
-//         .map(|s: &str| DataStock::Order {
-//             store_name: s.to_string(),
-//             store_kind: String::from("Database"),
-//             modifiers: Vec::new(),
-//             stock: Vec::new()
-//         });
-//
-//     let stock = just("a");
-//
-//
-//     store
-//         // .then(
-// }
+fn parse_stock<'i>(input: &mut &'i str) -> winnow::Result<DataStock> {
+    let whitespace = |t| (multispace0, t, multispace0);
 
-fn read_order(order: String) -> DataStock {
-    let work = parser().parse(&order);
+    let multiple_records = delimited(whitespace("["), parse_record, whitespace("]"));
 
-    match parser().parse(&order).into_result() {
-        Ok(ast) => return ast,
-        Err(parse_errs) => {
-            parse_errs
-            .into_iter()
-            .for_each(|e| println!("Parse error: {}", e));
-            panic!();
-        }
-    }
+    let bin_name = alpha1.map(String::from).parse_next(input)?;
+
+    let records = alt((
+        multiple_records.map(|ds| vec![ds]),
+        parse_record.map(|ds| vec![ds]),
+        empty.map(|_| Vec::new()),
+    ))
+    .parse_next(input)?;
+
+    Ok(DataStock::Stock { bin_name, records })
 }
 
+fn parser<'src>(input: &mut &'src str) -> winnow::Result<DataStock> {
+    let whitespace = |t| (multispace0, t, multispace0);
+
+    let store_name = alpha1.map(String::from).parse_next(input)?;
+
+    let stock = delimited(whitespace("["), parse_stock, whitespace("]")).parse_next(input)?;
+
+    Ok(DataStock::Order {
+        store_name,
+        stock: vec![stock],
+        store_kind: String::from("Database"),
+        modifiers: vec![],
+    })
+}
+
+fn read_inventory(mut inventory: String) -> DataStock {
+    parser(&mut inventory.as_str()).unwrap()
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     macro_rules! build_data_stock {
-        (Stock { bin: $bin:expr }) => {
+        ({ bin: $bin:expr }) => {
             DataStock::Stock {
                 bin_name: String::from($bin),
-                records: Vec::new()
+                records: vec![]
             }
         };
-        (Order { store: $name:expr }) => {
-            DataStock::Order {
-                store_name: String::from($name),
-                store_kind: String::from("Database"),
-                modifiers: Vec::new(),
-                stock: Vec::new()
+        ([ { $key:expr, $val:expr } ] ) => {
+            DataStock::Record(
+                vec![
+                    DataStock::Attribute {
+                        key: String::from($key),
+                        value: Some(String::from($val)),
+                        label: None
+                    }
+                ]
+            )
+        };
+        ({ bin: $bin:expr, records: [ $($records:tt)+ ]}) => {
+            DataStock::Stock {
+                bin_name: String::from($bin),
+                records: vec![
+                    build_data_stock!($($records)+)
+                ]
             }
         };
-        (
-            Order { store: $name:expr , stock: [ $($stocks:tt)+ ] } 
-        ) => {
+        ({ store: $name:expr , stock: [ $($stocks:tt)+ ] }) => {
             DataStock::Order {
                 store_name: String::from($name),
                 store_kind: String::from("Database"),
@@ -206,33 +212,72 @@ mod tests {
     }
 
     #[test]
-    fn can_parse_a_store_name() {
-        let actual_result = read_order(String::from("Academia"));
+    fn can_parse_a_single_bin() {
+        let inventory = "Academia [ Student ]";
+        let actual_data_stock = read_inventory(String::from(inventory));
+
         assert_eq!(
-            actual_result,
-            build_data_stock!{
-                Order { store: "Academia" }
+            actual_data_stock,
+            build_data_stock! {
+                {
+                    store: "Academia",
+                    stock: [{ bin: "Student" }]
+                }
             }
         );
     }
 
     #[test]
-    fn can_parse_a_bin() {
-        let inventory = String::from("
-            Academia [ Student ]
-        ");
+    fn can_parse_a_single_record() {
+        let inventory = "Academia [ Student { key:value, }]";
+        let actual_data_stock = read_inventory(String::from(inventory));
 
-        let actual_result = read_order(inventory);
         assert_eq!(
-            actual_result,
+            actual_data_stock,
             build_data_stock! {
-                Order {
+                {
                     store: "Academia",
-                    stock: [ Stock { bin: "Student" } ]
+                    stock: [
+                        {
+                            bin: "Student",
+                            records: [
+                                [{"key","value"}]
+                            ]
+                        }
+                    ]
                 }
             }
         );
     }
+
+    // #[test]
+    // fn can_parse_a_store_name() {
+    //     let actual_result = read_order(String::from("Academia"));
+    //     assert_eq!(
+    //         actual_result,
+    //         build_data_stock!{
+    //             Order { store: "Academia" }
+    //         }
+    //     );
+    // }
+    //
+    // #[test]
+    // fn can_parse_a_bin() {
+    //     let inventory = String::from("
+    //         Academia [ Student ]
+    //     ");
+    //
+    //     let actual_result = read_order(inventory);
+    //     assert_eq!(
+    //         actual_result,
+    //         build_data_stock! {
+    //             Order {
+    //                 store: "Academia",
+    //                 stock: [ Stock { bin: "Student" } ]
+    //             }
+    //         }
+    //     );
+    // }
 
     // #[test_case(
     //     "a",
@@ -273,5 +318,4 @@ mod tests {
     //
     //     assert_eq!(subject_order, expected_order);
     // }
-
 }

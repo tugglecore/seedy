@@ -184,7 +184,6 @@ impl SpamStore {
 #[async_trait]
 impl Store for SpamStore {
     async fn plant(&self, seed: &str) {
-        
         let mut connection = self.connection.lock().await;
 
         let _ = connection

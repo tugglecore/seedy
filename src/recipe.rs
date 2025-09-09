@@ -88,29 +88,38 @@ pub struct Order {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum DataStock {
-    Values(String),
-    Count(u64),
-    Inventory(Vec<DataStock>),
-    Record(Vec<DataStock>),
-    Order {
-        store_name: String,
-        store_kind: String,
-        modifiers: Vec<DataStock>,
-        stock: Vec<DataStock>,
-    },
-    Stock {
-        bin_name: String,
-        records: Vec<DataStock>,
-    },
-    Attribute {
-        key: String,
-        value: Option<String>,
-        label: Option<String>,
-    },
+pub struct Attribute {
+    key: String,
+    value: Option<String>,
+    label: Option<String>
 }
 
-fn parse_record<'i>(input: &mut &'i str) -> winnow::Result<DataStock> {
+#[derive(Debug, PartialEq)]
+pub struct Record {
+    attributes: Vec<Attribute>
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Stok {
+    bin_name: String,
+    records: Vec<Record>
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Request {
+    store_name: String,
+    store_kind: String,
+    modifiers: Vec<String>,
+    stock: Vec<Stok>
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Inventory {
+    request: Vec<Request>
+}
+
+
+fn parse_record<'i>(input: &mut &'i str) -> winnow::Result<Record> {
     let whitespace = |t| (multispace0, t, multispace0);
 
     let attribute = separated_pair(
@@ -118,7 +127,7 @@ fn parse_record<'i>(input: &mut &'i str) -> winnow::Result<DataStock> {
         whitespace(":"),
         alpha1.map(String::from),
     )
-    .map(|(key, value)| DataStock::Attribute {
+    .map(|(key, value)| Attribute {
         key,
         value: Some(value),
         label: None,
@@ -129,11 +138,11 @@ fn parse_record<'i>(input: &mut &'i str) -> winnow::Result<DataStock> {
         separated(0.., attribute, ","),
         (opt(whitespace(",")), whitespace("}")),
     )
-    .map(DataStock::Record)
+    .map(|attributes| Record { attributes })
     .parse_next(input)
 }
 
-fn parse_stock<'i>(input: &mut &'i str) -> winnow::Result<DataStock> {
+fn parse_stock<'i>(input: &mut &'i str) -> winnow::Result<Stok> {
     let whitespace = |t| (multispace0, t, multispace0);
 
     let multiple_records = delimited(whitespace("["), parse_record, whitespace("]"));
@@ -147,17 +156,17 @@ fn parse_stock<'i>(input: &mut &'i str) -> winnow::Result<DataStock> {
     ))
     .parse_next(input)?;
 
-    Ok(DataStock::Stock { bin_name, records })
+    Ok(Stok { bin_name, records })
 }
 
-fn parser<'src>(input: &mut &'src str) -> winnow::Result<DataStock> {
+fn parser<'src>(input: &mut &'src str) -> winnow::Result<Request> {
     let whitespace = |t| (multispace0, t, multispace0);
 
     let store_name = alpha1.map(String::from).parse_next(input)?;
 
     let stock = delimited(whitespace("["), parse_stock, whitespace("]")).parse_next(input)?;
 
-    Ok(DataStock::Order {
+    Ok(Request {
         store_name,
         stock: vec![stock],
         store_kind: String::from("Database"),
@@ -165,7 +174,7 @@ fn parser<'src>(input: &mut &'src str) -> winnow::Result<DataStock> {
     })
 }
 
-fn read_inventory(mut inventory: String) -> DataStock {
+fn read_inventory(mut inventory: String) -> Request {
     parser(&mut inventory.as_str()).unwrap()
 }
 
@@ -175,24 +184,24 @@ mod tests {
 
     macro_rules! build_data_stock {
         ({ bin: $bin:expr }) => {
-            DataStock::Stock {
+            Stok {
                 bin_name: String::from($bin),
                 records: vec![]
             }
         };
         ([ { $key:expr, $val:expr } ] ) => {
-            DataStock::Record(
-                vec![
-                    DataStock::Attribute {
+            Record {
+                attributes: vec![
+                   Attribute {
                         key: String::from($key),
                         value: Some(String::from($val)),
                         label: None
                     }
                 ]
-            )
+            }
         };
         ({ bin: $bin:expr, records: [ $($records:tt)+ ]}) => {
-            DataStock::Stock {
+            Stok {
                 bin_name: String::from($bin),
                 records: vec![
                     build_data_stock!($($records)+)
@@ -200,7 +209,7 @@ mod tests {
             }
         };
         ({ store: $name:expr , stock: [ $($stocks:tt)+ ] }) => {
-            DataStock::Order {
+            Request {
                 store_name: String::from($name),
                 store_kind: String::from("Database"),
                 stock: vec![

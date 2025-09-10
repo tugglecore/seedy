@@ -91,18 +91,18 @@ pub struct Order {
 pub struct Attribute {
     key: String,
     value: Option<String>,
-    label: Option<String>
+    label: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Record {
-    attributes: Vec<Attribute>
+    attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Stok {
     bin_name: String,
-    records: Vec<Record>
+    records: Vec<Record>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -110,14 +110,18 @@ pub struct Request {
     store_name: String,
     store_kind: String,
     modifiers: Vec<String>,
-    stock: Vec<Stok>
+    stock: Vec<Stok>,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Inventory {
-    request: Vec<Request>
+pub struct StockOrder {
+    requests: Vec<Request>,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct DataStock {
+    stock_order_ast: StockOrder,
+}
 
 fn parse_record<'i>(input: &mut &'i str) -> winnow::Result<Record> {
     let whitespace = |t| (multispace0, t, multispace0);
@@ -159,28 +163,43 @@ fn parse_stock<'i>(input: &mut &'i str) -> winnow::Result<Stok> {
     Ok(Stok { bin_name, records })
 }
 
-fn parser<'src>(input: &mut &'src str) -> winnow::Result<Request> {
+fn parse_request<'src>(input: &mut &'src str) -> winnow::Result<Request> {
     let whitespace = |t| (multispace0, t, multispace0);
 
-    let store_name = alpha1.map(String::from).parse_next(input)?;
+    let store_name = delimited(multispace0, alpha1, multispace0)
+        .map(String::from)
+        .parse_next(input)?;
 
-    let stock = delimited(whitespace("["), parse_stock, whitespace("]")).parse_next(input)?;
+    let stock = delimited(
+        whitespace("["),
+        repeat(0.., delimited(multispace0, parse_stock, multispace0)),
+        whitespace("]"),
+    )
+    .parse_next(input)?;
 
     Ok(Request {
         store_name,
-        stock: vec![stock],
+        stock,
         store_kind: String::from("Database"),
         modifiers: vec![],
     })
 }
+fn parser<'src>(input: &mut &'src str) -> winnow::Result<StockOrder> {
+    let requests =
+        repeat(0.., delimited(multispace0, parse_request, multispace0)).parse_next(input)?;
 
-fn read_inventory(mut inventory: String) -> Request {
+    Ok(StockOrder { requests })
+}
+
+fn read_inventory(mut inventory: String) -> StockOrder {
     parser(&mut inventory.as_str()).unwrap()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
+    use test_case::test_case;
 
     macro_rules! build_data_stock {
         ({ bin: $bin:expr }) => {
@@ -208,123 +227,121 @@ mod tests {
                 ]
             }
         };
-        ({ store: $name:expr , stock: [ $($stocks:tt)+ ] }) => {
+        ({ store: $name:expr , stock: [ $($stocks:tt),+ ] }) => {
             Request {
                 store_name: String::from($name),
                 store_kind: String::from("Database"),
                 stock: vec![
-                    build_data_stock!($($stocks)+)
+                    $(build_data_stock!($stocks)),+
                 ],
                 modifiers: Vec::new()
+            }
+        };
+        ($($order:tt);*$(;)?) => {
+            StockOrder {
+                requests: vec![$(build_data_stock!($order)),+]
             }
         }
     }
 
-    #[test]
-    fn can_parse_a_single_bin() {
-        let inventory = "Academia [ Student ]";
-        let actual_data_stock = read_inventory(String::from(inventory));
+    #[test_case(
+        "Academia [ Student ]",
+        build_data_stock! [
+            {
+                store: "Academia",
+                stock: [{ bin: "Student" }]
+            };
+        ];
+        "a single bin"
+    )]
+    #[test_case(
+        "Academia [ Student College ]",
+        build_data_stock! [
+            {
+                store: "Academia",
+                stock: [{ bin: "Student" }, { bin: "College" }]
+            };
+        ];
+        "multiple bins"
+    )]
+    #[test_case(
+        "Academia [ Student { key:value }]",
+        build_data_stock! [
+            {
+                store: "Academia",
+                stock: [
+                    {
+                        bin: "Student",
+                        records: [
+                            [{"key","value"}]
+                        ]
+                    }
+                ]
+            };
+        ];
+        "a single record with a single attribute"
+    )]
+    // #[test_case(
+    //     "Academia [ Student { key:value }]",
+    //     build_data_stock! [
+    //         {
+    //             store: "Academia",
+    //             stock: [
+    //                 {
+    //                     bin: "Student",
+    //                     records: [
+    //                         [{"key","value"}]
+    //                     ]
+    //                 }
+    //             ]
+    //         };
+    //     ];
+    //     "a single record with multiple attributes"
+    // )]
+    #[test_case(
+        "
+            Academia [ 
+                Student { key:value, } College { key: value }
+            ]
+        ",
+        build_data_stock! [
+            {
+                store: "Academia",
+                stock: [
+                    { bin: "Student", records: [[{"key","value"}]] },
+                    { bin: "College", records: [[{"key", "value"}]] }
+                ]
+            };
+        ];
+        "multiple records"
+    )]
+    #[test_case(
+        "
+            Academia [ 
+                Student { key:value, } College { key: value }
+            ]
+            LMS [ Grades { key: value } ]
+        ",
+        build_data_stock![
+            {
+                store: "Academia",
+                stock: [
+                    { bin: "Student", records: [[{"key","value"}]] },
+                    { bin: "College", records: [[{"key", "value"}]] }
+                ]
+            };
+            {
+                store: "LMS",
+                stock: [
+                    { bin: "Grades", records: [[{"key","value"}]] }
+                ]
+            };
+        ];
+        "multiple_stores"
+    )]
+    fn can_parse(stock_order: &str, expected_stock_order: StockOrder) {
+        let actual_data_stock = read_inventory(String::from(stock_order));
 
-        assert_eq!(
-            actual_data_stock,
-            build_data_stock! {
-                {
-                    store: "Academia",
-                    stock: [{ bin: "Student" }]
-                }
-            }
-        );
+        assert_eq!(actual_data_stock, expected_stock_order);
     }
-
-    #[test]
-    fn can_parse_a_single_record() {
-        let inventory = "Academia [ Student { key:value, }]";
-        let actual_data_stock = read_inventory(String::from(inventory));
-
-        assert_eq!(
-            actual_data_stock,
-            build_data_stock! {
-                {
-                    store: "Academia",
-                    stock: [
-                        {
-                            bin: "Student",
-                            records: [
-                                [{"key","value"}]
-                            ]
-                        }
-                    ]
-                }
-            }
-        );
-    }
-
-    // #[test]
-    // fn can_parse_a_store_name() {
-    //     let actual_result = read_order(String::from("Academia"));
-    //     assert_eq!(
-    //         actual_result,
-    //         build_data_stock!{
-    //             Order { store: "Academia" }
-    //         }
-    //     );
-    // }
-    //
-    // #[test]
-    // fn can_parse_a_bin() {
-    //     let inventory = String::from("
-    //         Academia [ Student ]
-    //     ");
-    //
-    //     let actual_result = read_order(inventory);
-    //     assert_eq!(
-    //         actual_result,
-    //         build_data_stock! {
-    //             Order {
-    //                 store: "Academia",
-    //                 stock: [ Stock { bin: "Student" } ]
-    //             }
-    //         }
-    //     );
-    // }
-
-    // #[test_case(
-    //     "a",
-    //     build_order!(["a"]);
-    //     "stock one identifier shelf"
-    // )]
-    // #[test_case(
-    //     "a <b=c>",
-    //     build_order!(["a"], [("b", "c")]);
-    //     "stock shelf with modifier"
-    // )]
-    // // Note: a <b=c> [ 3 * ] is an error b/c of the trailing asterisk
-    // #[test_case(
-    //     "a <b=c> [ 3 ]",
-    //     build_order!(["a"], [("b", "c")], 3);
-    //     "stock shelf with specific count"
-    // )]
-    // #[test_case(
-    //     "a <b=c> [ 14 * { d: e } ]",
-    //     build_order!(
-    //         ["a"], [("b", "c")], 14,
-    //         [("d", "e")]
-    //     );
-    //     "stock shelf with requested stock"
-    // )]
-    // #[test_case(
-    //     "store.section.shelf <a=b, c = d> [ 100 * { i:j, d:e, h:i } ]",
-    //     build_order!(
-    //         ["store", "section", "shelf"],
-    //         [("a", "b"), ("c", "d")],
-    //         100,
-    //         [("i", "j"), ("d", "e"), ("h", "i")]
-    //     );
-    //     "kitchen sink example"
-    // )]
-    // fn parse_simples(stock_order: &str, expected_order: StockOrder) {
-    //     let subject_order = process_order(stock_order).pop().unwrap();
-    //
-    //     assert_eq!(subject_order, expected_order);
-    // }
 }

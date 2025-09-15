@@ -89,15 +89,12 @@ pub struct Order {
 
 #[derive(Debug, PartialEq)]
 pub struct Attribute {
-    key: String,
     value: Option<String>,
     label: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Record {
-    attributes: Vec<Attribute>,
-}
+pub struct Record(HashMap<String, Attribute>);
 
 #[derive(Debug, PartialEq)]
 pub struct Stok {
@@ -131,18 +128,25 @@ fn parse_record<'i>(input: &mut &'i str) -> winnow::Result<Record> {
         whitespace(":"),
         alpha1.map(String::from),
     )
-    .map(|(key, value)| Attribute {
-        key,
-        value: Some(value),
-        label: None,
+    .map(|(key, value)| {
+        (
+            key,
+            Attribute {
+                value: Some(value),
+                label: None,
+            },
+        )
     });
 
+    let attributes = separated(0.., attribute, whitespace(","));
+
+    // TODO: Think about the min # of occourrences when parsing attributes
     delimited(
         whitespace("{"),
-        separated(0.., attribute, ","),
+        attributes,
         (opt(whitespace(",")), whitespace("}")),
     )
-    .map(|attributes| Record { attributes })
+    .map(|attributes: Vec<_>| Record(HashMap::from_iter(attributes)))
     .parse_next(input)
 }
 
@@ -208,22 +212,27 @@ mod tests {
                 records: vec![]
             }
         };
-        ([ { $key:expr, $val:expr } ] ) => {
-            Record {
-                attributes: vec![
-                   Attribute {
-                        key: String::from($key),
-                        value: Some(String::from($val)),
-                        label: None
-                    }
-                ]
-            }
+        ({ $key:expr, $val:expr }) => {
+            (
+                String::from($key),
+                Attribute {
+                    value: Some(String::from($val)),
+                    label: None
+                }
+            )
         };
-        ({ bin: $bin:expr, records: [ $($records:tt)+ ]}) => {
+        ([ $($attributes:tt),+ ] ) => {
+            Record(
+                HashMap::from([
+                    $(build_data_stock!($attributes)),+
+                ])
+            )
+        };
+        ({ bin: $bin:expr, records: [ $($records:tt),+ ]}) => {
             Stok {
                 bin_name: String::from($bin),
                 records: vec![
-                    build_data_stock!($($records)+)
+                    $(build_data_stock!($records)),+
                 ]
             }
         };
@@ -243,6 +252,11 @@ mod tests {
             }
         }
     }
+
+    /* Test for unique lables w/i same record (bin?)
+     *
+     *
+     */
 
     #[test_case(
         "Academia [ Student ]",
@@ -281,26 +295,26 @@ mod tests {
         ];
         "a single record with a single attribute"
     )]
-    // #[test_case(
-    //     "Academia [ Student { key:value }]",
-    //     build_data_stock! [
-    //         {
-    //             store: "Academia",
-    //             stock: [
-    //                 {
-    //                     bin: "Student",
-    //                     records: [
-    //                         [{"key","value"}]
-    //                     ]
-    //                 }
-    //             ]
-    //         };
-    //     ];
-    //     "a single record with multiple attributes"
-    // )]
+    #[test_case(
+        "Academia [ Student { key:value, a:e}]",
+        build_data_stock! [
+            {
+                store: "Academia",
+                stock: [
+                    {
+                        bin: "Student",
+                        records: [
+                            [{"key","value"}, {"a", "e"}]
+                        ]
+                    }
+                ]
+            };
+        ];
+        "a single record with multiple attributes"
+    )]
     #[test_case(
         "
-            Academia [ 
+            Academia [
                 Student { key:value, } College { key: value }
             ]
         ",
@@ -317,7 +331,7 @@ mod tests {
     )]
     #[test_case(
         "
-            Academia [ 
+            Academia [
                 Student { key:value, } College { key: value }
             ]
             LMS [ Grades { key: value } ]
